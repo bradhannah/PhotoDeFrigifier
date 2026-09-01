@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Provider Access Lab</string>
+    <key>CFBundleExecutable</key>
+    <string>ProviderAccessLab</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.photodefrigifier.provider-access-lab</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Provider Access Lab</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Provider Access Lab may create a controlled test asset only after explicit confirmation.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Provider Access Lab counts local Photos assets and resource roles without retaining filenames or identifiers.</string>
+</dict>
+</plist>

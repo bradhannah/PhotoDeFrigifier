@@ -1,0 +1,17 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local provider credentials and raw probe output must never be committed.
+.env
+.env.*
+!.env.example
+*.secret
+amazon-private-photo-inventory*.jsonl
+photo-defrigifier-catalog*.jsonl
+Config/Local.xcconfig
+ProbeReports/
+Fixtures/Private/
