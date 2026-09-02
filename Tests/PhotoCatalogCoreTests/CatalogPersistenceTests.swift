@@ -72,6 +72,7 @@ import Testing
     externalID: "external-1",
     firstObservedImportRunID: "run-1",
     latestObservationID: "observation-3",
+    lastSeenImportRunID: "run-1",
     kind: .photo
   )
 
@@ -111,6 +112,7 @@ import Testing
       externalID: "external-1",
       firstObservedImportRunID: "run-1",
       latestObservationID: "observation-1",
+      lastSeenImportRunID: "run-1",
       kind: .photo
     ))
 
@@ -177,6 +179,104 @@ import Testing
   }
 }
 
+@Test func catalogMigratesSchemaTwoCurrentRunPointers() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+    UUID().uuidString,
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let source = directory.appendingPathComponent("schema-2-catalog.jsonl")
+  try CatalogJSONLStore.write(fixtureCatalog(), to: source)
+  let currentContents = try String(contentsOf: source, encoding: .utf8)
+  let legacyContents =
+    currentContents
+    .replacingOccurrences(
+      of: "\"schemaVersion\":\(CatalogSchema.currentVersion)",
+      with: "\"schemaVersion\":2"
+    )
+    .replacingOccurrences(of: "\"latestImportRunID\":\"run-1\",", with: "")
+    .replacingOccurrences(of: "\"lastSeenImportRunID\":\"run-1\",", with: "")
+  try Data(legacyContents.utf8).write(to: source)
+
+  let migrated = try CatalogJSONLStore.read(from: source)
+
+  #expect(migrated.schemaVersion == CatalogSchema.currentVersion)
+  #expect(migrated.sourceLibraries[0].latestImportRunID == "run-1")
+  #expect(migrated.sourceItems.allSatisfy { $0.lastSeenImportRunID == "run-1" })
+  try CatalogJSONLStore.validate(migrated)
+}
+
+@Test func corruptSchemaTwoDuplicateObservationIsRejectedWithoutCrashing() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+    UUID().uuidString,
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let source = directory.appendingPathComponent("corrupt-schema-2-catalog.jsonl")
+  try CatalogJSONLStore.write(fixtureCatalog(), to: source)
+  let currentContents = try String(contentsOf: source, encoding: .utf8)
+  let corruptContents =
+    currentContents
+    .replacingOccurrences(
+      of: "\"schemaVersion\":\(CatalogSchema.currentVersion)",
+      with: "\"schemaVersion\":2"
+    )
+    .replacingOccurrences(of: "\"id\":\"observation-2\"", with: "\"id\":\"observation-1\"")
+  try Data(corruptContents.utf8).write(to: source)
+
+  #expect(throws: CatalogStoreError.duplicateEntity("source observation")) {
+    try CatalogJSONLStore.read(from: source)
+  }
+}
+
+@Test func catalogRejectsLastSeenRunThatDoesNotOwnLatestObservation() {
+  var snapshot = fixtureCatalog()
+  snapshot.importRuns.append(
+    ImportRun(
+      id: "run-2",
+      sourceLibraryID: "library-1",
+      adapterID: "fixture",
+      adapterVersion: 1,
+      sourceFingerprintSHA256: String(repeating: "c", count: 64),
+      sourceSchemaVersion: 1,
+      capturedAt: nil,
+      importedAt: Date(timeIntervalSinceReferenceDate: 5_000),
+      sourceRecordCount: 0
+    ))
+  let item = snapshot.sourceItems[0]
+  snapshot.sourceItems[0] = SourceItem(
+    id: item.id,
+    sourceLibraryID: item.sourceLibraryID,
+    externalID: item.externalID,
+    firstObservedImportRunID: item.firstObservedImportRunID,
+    latestObservationID: item.latestObservationID,
+    lastSeenImportRunID: "run-2",
+    kind: item.kind
+  )
+
+  #expect(throws: CatalogStoreError.invalidReference("source item")) {
+    try CatalogJSONLStore.validate(snapshot)
+  }
+}
+
+@Test func catalogRejectsLibraryWithRunsButNoCurrentRun() {
+  var snapshot = fixtureCatalog()
+  let library = snapshot.sourceLibraries[0]
+  snapshot.sourceLibraries[0] = SourceLibrary(
+    id: library.id,
+    provider: library.provider,
+    externalAccountID: library.externalAccountID,
+    displayName: library.displayName
+  )
+
+  #expect(throws: CatalogStoreError.invalidReference("source library latest import")) {
+    try CatalogJSONLStore.validate(snapshot)
+  }
+  #expect(CatalogIdentityIndex(snapshot: snapshot).automaticMatches.isEmpty)
+}
+
 @Test func jsonlReaderRejectsSourceChangedDuringRead() throws {
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
     UUID().uuidString,
@@ -231,7 +331,8 @@ import Testing
     SourceLibrary(
       id: "library-1",
       provider: .amazon,
-      externalAccountID: "different-account"
+      externalAccountID: "different-account",
+      latestImportRunID: "run-2"
     )
   ]
 
@@ -295,7 +396,13 @@ private func fixtureCatalog() -> CatalogSnapshot {
     measuredAt: importedAt
   )
   return CatalogSnapshot(
-    sourceLibraries: [SourceLibrary(id: "library-1", provider: .filesystem)],
+    sourceLibraries: [
+      SourceLibrary(
+        id: "library-1",
+        provider: .filesystem,
+        latestImportRunID: "run-1"
+      )
+    ],
     importRuns: [
       ImportRun(
         id: "run-1",
@@ -332,6 +439,7 @@ private func fixtureCatalog() -> CatalogSnapshot {
         externalID: "external-1",
         firstObservedImportRunID: "run-1",
         latestObservationID: "observation-1",
+        lastSeenImportRunID: "run-1",
         kind: .photo
       ),
       SourceItem(
@@ -340,6 +448,7 @@ private func fixtureCatalog() -> CatalogSnapshot {
         externalID: "external-2",
         firstObservedImportRunID: "run-1",
         latestObservationID: "observation-2",
+        lastSeenImportRunID: "run-1",
         kind: .photo
       ),
     ],
@@ -394,7 +503,14 @@ private func fixtureSourceLibrary() -> SourceLibrary {
 
 private func emptyImportCatalog(runID: String, adapterVersion: Int) -> CatalogSnapshot {
   CatalogSnapshot(
-    sourceLibraries: [fixtureSourceLibrary()],
+    sourceLibraries: [
+      SourceLibrary(
+        id: "library-1",
+        provider: .filesystem,
+        externalAccountID: "fixture-account",
+        latestImportRunID: runID
+      )
+    ],
     importRuns: [
       ImportRun(
         id: runID,

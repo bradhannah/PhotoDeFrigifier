@@ -46,6 +46,242 @@ import Testing
   }
 }
 
+@Test func amazonVideoUsesVideoRoleWithStableResourceIdentity() throws {
+  try withFixtureInventory(contentType: "video/mp4") { source in
+    let snapshot = try AmazonCatalogImporter().importCatalog(from: source)
+
+    #expect(snapshot.sourceResources.allSatisfy { $0.role == .video })
+    #expect(
+      snapshot.sourceResources.allSatisfy { resource in
+        resource.id
+          == CatalogStableID.make(
+            prefix: "source-resource",
+            components: [resource.sourceItemID, "primary"]
+          )
+      }
+    )
+  }
+}
+
+@Test func locallyMeasuredMD5CreatesReviewOnlyAmazonBridge() throws {
+  try withFixtureInventory(
+    digest: "900150983cd24fb0d6963f7d28e17f72",
+    byteSize: 3
+  ) { amazonURL in
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data("abc".utf8).write(to: directory.appendingPathComponent("local.jpg"))
+
+    let amazon = try AmazonCatalogImporter().importCatalog(from: amazonURL)
+    let local = try FilesystemCatalogImporter().importCatalog(from: directory)
+    let merged = try CatalogMerge.merging(local, into: amazon)
+    let identity = CatalogIdentityIndex(snapshot: merged)
+
+    #expect(identity.automaticMatches.isEmpty)
+    #expect(identity.amazonMD5ReviewCandidates.count == 1)
+    #expect(identity.amazonMD5ReviewCandidates[0].localSourceResourceIDs.count == 1)
+    #expect(identity.amazonMD5ReviewCandidates[0].amazonSourceResourceIDs.count == 2)
+  }
+}
+
+@Test func amazonMD5BridgeRequiresCompatibleResourceRoles() throws {
+  try withFixtureInventory(
+    digest: "900150983cd24fb0d6963f7d28e17f72",
+    byteSize: 3
+  ) { amazonURL in
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data("abc".utf8).write(to: directory.appendingPathComponent("local.mov"))
+
+    let amazon = try AmazonCatalogImporter().importCatalog(from: amazonURL)
+    let local = try FilesystemCatalogImporter().importCatalog(from: directory)
+    let merged = try CatalogMerge.merging(local, into: amazon)
+
+    #expect(CatalogIdentityIndex(snapshot: merged).amazonMD5ReviewCandidates.isEmpty)
+  }
+}
+
+@Test func amazonMD5BridgeExcludesFilesMissingFromCurrentScan() throws {
+  try withFixtureInventory(
+    digest: "900150983cd24fb0d6963f7d28e17f72",
+    byteSize: 3
+  ) { amazonURL in
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fileURL = directory.appendingPathComponent("local.jpg")
+    try Data("abc".utf8).write(to: fileURL)
+
+    let importer = FilesystemCatalogImporter()
+    let first = try importer.importCatalog(
+      from: directory,
+      importedAt: Date(timeIntervalSinceReferenceDate: 1_000)
+    )
+    try FileManager.default.removeItem(at: fileURL)
+    let identity = FilesystemSourceIdentity(
+      sourceLibraryID: first.sourceLibraries[0].id,
+      externalAccountID: try #require(first.sourceLibraries[0].externalAccountID)
+    )
+    let second = try importer.importCatalog(
+      from: directory,
+      importedAt: Date(timeIntervalSinceReferenceDate: 2_000),
+      sourceIdentity: identity
+    )
+    let localHistory = try CatalogMerge.merging(second, into: first)
+    let amazon = try AmazonCatalogImporter().importCatalog(from: amazonURL)
+    let merged = try CatalogMerge.merging(amazon, into: localHistory)
+
+    #expect(CatalogIdentityIndex(snapshot: merged).amazonMD5ReviewCandidates.isEmpty)
+  }
+}
+
+@Test func oneReportedMD5RejectsAmbiguousLocalSHA256Anchors() throws {
+  try withFixtureInventory(
+    digest: "900150983cd24fb0d6963f7d28e17f72",
+    byteSize: 3
+  ) { amazonURL in
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data("abc".utf8).write(to: directory.appendingPathComponent("first.jpg"))
+    try Data("def".utf8).write(to: directory.appendingPathComponent("second.jpg"))
+
+    var local = try FilesystemCatalogImporter().importCatalog(from: directory)
+    local.byteResources = local.byteResources.map { resource in
+      ByteResource(
+        id: resource.id,
+        sha256: resource.sha256,
+        locallyMeasuredMD5: "900150983cd24fb0d6963f7d28e17f72",
+        byteCount: resource.byteCount,
+        verificationMethod: resource.verificationMethod,
+        measuredAt: resource.measuredAt
+      )
+    }
+    let amazon = try AmazonCatalogImporter().importCatalog(from: amazonURL)
+    let merged = try CatalogMerge.merging(local, into: amazon)
+    let candidates = CatalogIdentityIndex(snapshot: merged).amazonMD5ReviewCandidates
+
+    #expect(candidates.isEmpty)
+  }
+}
+
+@Test func confirmedAmazonMD5BridgePropagatesCanonicalPersonMembership() throws {
+  try withFixtureInventory(
+    digest: "900150983cd24fb0d6963f7d28e17f72",
+    byteSize: 3
+  ) { amazonURL in
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data("abc".utf8).write(to: directory.appendingPathComponent("local.jpg"))
+
+    let amazon = try AmazonCatalogImporter().importCatalog(from: amazonURL)
+    let local = try FilesystemCatalogImporter().importCatalog(from: directory)
+    let merged = try CatalogMerge.merging(local, into: amazon)
+    let candidate = try #require(
+      CatalogIdentityIndex(snapshot: merged).amazonMD5ReviewCandidates.first
+    )
+    let sourcePersonID = try #require(amazon.sourcePeople.first?.id)
+    var review = LibraryProjectReviewState()
+    review.createCanonicalPerson(
+      preferredName: "Fixture Person",
+      sourcePersonID: sourcePersonID,
+      at: Date(timeIntervalSinceReferenceDate: 1_000)
+    )
+    let canonicalPersonID = try #require(review.canonicalPeople.first?.id)
+    review.setPrivacyCategory(
+      .neverCloud,
+      for: canonicalPersonID,
+      at: Date(timeIntervalSinceReferenceDate: 1_500)
+    )
+    let beforeConfirmation = CatalogPeopleIndex(snapshot: merged, reviewState: review)
+    review.setDuplicateDisposition(
+      .confirmedDuplicate,
+      for: candidate.id,
+      at: Date(timeIntervalSinceReferenceDate: 2_000)
+    )
+    let afterConfirmation = CatalogPeopleIndex(snapshot: merged, reviewState: review)
+
+    #expect(beforeConfirmation.memberships.count == 1)
+    #expect(afterConfirmation.memberships.count == 3)
+    #expect(afterConfirmation.memberships.count(where: \.isPropagated) == 2)
+    #expect(afterConfirmation.effectivePrivacyByAssetID.values.allSatisfy { $0 == .neverCloud })
+  }
+}
+
+@Test func directPersonEvidenceDominatesPropagationRegardlessOfClaimOrder() throws {
+  try withFixtureInventory(
+    digest: "900150983cd24fb0d6963f7d28e17f72",
+    byteSize: 3
+  ) { amazonURL in
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data("abc".utf8).write(to: directory.appendingPathComponent("local.jpg"))
+
+    let amazon = try AmazonCatalogImporter().importCatalog(from: amazonURL)
+    let local = try FilesystemCatalogImporter().importCatalog(from: directory)
+    var merged = try CatalogMerge.merging(local, into: amazon)
+    let secondItem = try #require(merged.sourceItems.first { $0.externalID == "photo-2" })
+    let secondAsset = try #require(merged.assets.first { $0.sourceItemIDs.contains(secondItem.id) })
+    let secondObservation = try #require(
+      merged.sourceObservations.first { $0.id == secondItem.latestObservationID }
+    )
+    let sourcePersonID = try #require(amazon.sourcePeople.first?.id)
+    let directClaim = PersonMembershipClaim(
+      id: "second-direct-membership",
+      sourcePersonID: sourcePersonID,
+      sourceItemID: secondItem.id,
+      assetID: secondAsset.id,
+      importRunID: secondObservation.importRunID,
+      observationID: secondObservation.id,
+      confidence: 1
+    )
+    let candidate = try #require(
+      CatalogIdentityIndex(snapshot: merged).amazonMD5ReviewCandidates.first
+    )
+    var review = LibraryProjectReviewState()
+    review.createCanonicalPerson(
+      preferredName: "Fixture Person",
+      sourcePersonID: sourcePersonID
+    )
+    review.setDuplicateDisposition(.confirmedDuplicate, for: candidate.id)
+
+    for claims in [
+      merged.personMembershipClaims + [directClaim],
+      [directClaim] + merged.personMembershipClaims,
+    ] {
+      merged.personMembershipClaims = claims
+      let membership = try #require(
+        CatalogPeopleIndex(snapshot: merged, reviewState: review).memberships.first {
+          $0.assetID == secondAsset.id
+        })
+      #expect(!membership.isPropagated)
+      #expect(membership.originatingClaimIDs.contains(directClaim.id))
+    }
+  }
+}
+
 @Test func amazonImportRejectsAnIncompleteSummary() throws {
   try withFixtureInventory(expectedPhotoCount: 3) { source in
     #expect(throws: AmazonCatalogImportError.invalidSummary) {
@@ -142,6 +378,9 @@ private func withFixtureInventory(
   expectedPhotoCount: Int = 2,
   createdDate: String = "2025-01-01T00:00:00Z",
   includeRootMetadata: Bool = true,
+  contentType: String = "image/jpeg",
+  digest: String = "0123456789abcdef0123456789abcdef",
+  byteSize: Int = 1_024,
   body: (URL) throws -> Void
 ) throws {
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -151,7 +390,6 @@ private func withFixtureInventory(
   try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: directory) }
   let source = directory.appendingPathComponent("amazon-inventory.jsonl")
-  let digest = "0123456789abcdef0123456789abcdef"
   let photo1: [String: Any] = [
     "id": "photo-1",
     "ownerId": "account-1",
@@ -162,8 +400,8 @@ private func withFixtureInventory(
     "settings": ["favorite": true],
     "contentProperties": [
       "contentDate": "2024-12-31T18:00:00Z",
-      "contentType": "image/jpeg",
-      "size": 1_024,
+      "contentType": contentType,
+      "size": byteSize,
       "md5": digest,
       "image": [
         "width": 1_200,
@@ -184,8 +422,8 @@ private func withFixtureInventory(
     "status": "AVAILABLE",
     "contentProperties": [
       "contentDate": "2024-12-31T18:00:00Z",
-      "contentType": "image/jpeg",
-      "size": 1_024,
+      "contentType": contentType,
+      "size": byteSize,
       "md5": digest,
       "image": ["width": 1_200, "height": 800],
     ],

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum CatalogSchema {
-  public static let currentVersion = 2
+  public static let currentVersion = 3
 }
 
 public enum CatalogProvider: String, Codable, CaseIterable, Sendable {
@@ -16,17 +16,20 @@ public struct SourceLibrary: Codable, Equatable, Sendable {
   public let provider: CatalogProvider
   public let externalAccountID: String?
   public let displayName: String?
+  public let latestImportRunID: String?
 
   public init(
     id: String,
     provider: CatalogProvider,
     externalAccountID: String? = nil,
-    displayName: String? = nil
+    displayName: String? = nil,
+    latestImportRunID: String? = nil
   ) {
     self.id = id
     self.provider = provider
     self.externalAccountID = externalAccountID
     self.displayName = displayName
+    self.latestImportRunID = latestImportRunID
   }
 }
 
@@ -105,6 +108,7 @@ public struct SourceItem: Codable, Equatable, Sendable {
   public let externalID: String
   public let firstObservedImportRunID: String
   public let latestObservationID: String
+  public let lastSeenImportRunID: String?
   public let kind: AssetKind
 
   public init(
@@ -113,6 +117,7 @@ public struct SourceItem: Codable, Equatable, Sendable {
     externalID: String,
     firstObservedImportRunID: String,
     latestObservationID: String,
+    lastSeenImportRunID: String? = nil,
     kind: AssetKind
   ) {
     self.id = id
@@ -120,11 +125,13 @@ public struct SourceItem: Codable, Equatable, Sendable {
     self.externalID = externalID
     self.firstObservedImportRunID = firstObservedImportRunID
     self.latestObservationID = latestObservationID
+    self.lastSeenImportRunID = lastSeenImportRunID
     self.kind = kind
   }
 }
 
 public enum ResourceRole: String, Codable, CaseIterable, Sendable {
+  case audio
   case edited
   case original
   case pairedVideo
@@ -135,6 +142,7 @@ public enum ResourceRole: String, Codable, CaseIterable, Sendable {
 
   var compatibilityClass: String {
     switch self {
+    case .audio: "audio"
     case .original, .primary: "photo-original"
     case .edited: "photo-edited"
     case .pairedVideo: "paired-video"
@@ -198,6 +206,7 @@ public enum ByteVerificationMethod: String, Codable, Sendable {
 public struct ByteResource: Codable, Equatable, Sendable {
   public let id: String
   public let sha256: String
+  public let locallyMeasuredMD5: String?
   public let byteCount: Int64
   public let verificationMethod: ByteVerificationMethod
   public let measuredAt: Date
@@ -205,12 +214,14 @@ public struct ByteResource: Codable, Equatable, Sendable {
   public init(
     id: String,
     sha256: String,
+    locallyMeasuredMD5: String? = nil,
     byteCount: Int64,
     verificationMethod: ByteVerificationMethod,
     measuredAt: Date
   ) {
     self.id = id
     self.sha256 = sha256
+    self.locallyMeasuredMD5 = locallyMeasuredMD5
     self.byteCount = byteCount
     self.verificationMethod = verificationMethod
     self.measuredAt = measuredAt

@@ -37,6 +37,25 @@ public struct ApplePhotoObservation: Codable, Equatable, Sendable {
   }
 }
 
+public enum LocalResourceReadState: String, Codable, Sendable {
+  case measured
+  case notRequested
+  case requiresNetwork
+  case unavailable
+}
+
+public struct LocalResourceMeasurement: Codable, Equatable, Sendable {
+  public let sha256: String
+  public let md5: String
+  public let byteCount: Int64
+
+  public init(sha256: String, md5: String, byteCount: Int64) {
+    self.sha256 = sha256
+    self.md5 = md5
+    self.byteCount = byteCount
+  }
+}
+
 // A Takeout adapter should pair each media file with its sidecar before emitting this value.
 public struct GoogleTakeoutObservation: Codable, Equatable, Sendable {
   public let sourceRelativePath: String
@@ -63,6 +82,11 @@ public struct ProviderResourceObservation: Codable, Equatable, Sendable {
   public let filename: String?
   public let mediaType: String?
   public let byteCount: Int64?
+  public let width: Int?
+  public let height: Int?
+  public let nativeResourceType: String?
+  public let localReadState: LocalResourceReadState
+  public let localMeasurement: LocalResourceMeasurement?
   public let reportedDigests: [ReportedDigest]
 
   public init(
@@ -71,6 +95,11 @@ public struct ProviderResourceObservation: Codable, Equatable, Sendable {
     filename: String? = nil,
     mediaType: String? = nil,
     byteCount: Int64? = nil,
+    width: Int? = nil,
+    height: Int? = nil,
+    nativeResourceType: String? = nil,
+    localReadState: LocalResourceReadState = .notRequested,
+    localMeasurement: LocalResourceMeasurement? = nil,
     reportedDigests: [ReportedDigest] = []
   ) {
     self.externalID = externalID
@@ -78,6 +107,11 @@ public struct ProviderResourceObservation: Codable, Equatable, Sendable {
     self.filename = filename
     self.mediaType = mediaType
     self.byteCount = byteCount
+    self.width = width
+    self.height = height
+    self.nativeResourceType = nativeResourceType
+    self.localReadState = localReadState
+    self.localMeasurement = localMeasurement
     self.reportedDigests = reportedDigests
   }
 }

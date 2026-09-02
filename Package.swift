@@ -9,13 +9,25 @@ let package = Package(
   ],
   products: [
     .library(name: "PhotoCatalogCore", targets: ["PhotoCatalogCore"]),
+    .library(name: "ApplePhotosAdapter", targets: ["ApplePhotosAdapter"]),
     .library(name: "ProviderAccessCore", targets: ["ProviderAccessCore"]),
     .executable(name: "PhotoDeFrigifierApp", targets: ["PhotoDeFrigifierApp"]),
     .executable(name: "ProviderAccessLab", targets: ["ProviderAccessLab"]),
   ],
   targets: [
     .target(
-      name: "PhotoCatalogCore"
+      name: "PhotoCatalogCore",
+      linkerSettings: [
+        .linkedFramework("ImageIO"),
+        .linkedFramework("UniformTypeIdentifiers"),
+      ]
+    ),
+    .target(
+      name: "ApplePhotosAdapter",
+      dependencies: ["PhotoCatalogCore"],
+      linkerSettings: [
+        .linkedFramework("Photos")
+      ]
     ),
     .target(
       name: "ProviderAccessCore",
@@ -25,7 +37,7 @@ let package = Package(
     ),
     .executableTarget(
       name: "PhotoDeFrigifierApp",
-      dependencies: ["PhotoCatalogCore"]
+      dependencies: ["PhotoCatalogCore", "ApplePhotosAdapter"]
     ),
     .executableTarget(
       name: "ProviderAccessLab",
@@ -34,6 +46,10 @@ let package = Package(
     .testTarget(
       name: "PhotoCatalogCoreTests",
       dependencies: ["PhotoCatalogCore"]
+    ),
+    .testTarget(
+      name: "ApplePhotosAdapterTests",
+      dependencies: ["ApplePhotosAdapter"]
     ),
     .testTarget(
       name: "ProviderAccessCoreTests",

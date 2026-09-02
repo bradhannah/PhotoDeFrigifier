@@ -8,9 +8,16 @@ public enum CatalogMerge {
     try CatalogJSONLStore.validate(existing)
     try CatalogJSONLStore.validate(incoming)
     try rejectIdentityConflicts(existing: existing, incoming: incoming)
+    let existingLibrariesByID = Dictionary(
+      uniqueKeysWithValues: existing.sourceLibraries.map { ($0.id, $0) })
     if incoming.importRuns.allSatisfy({ run in
       existing.importRuns.contains { sameImportIdentity($0, run) }
-    }) {
+    })
+      && incoming.sourceLibraries.allSatisfy({ library in
+        existingLibrariesByID[library.id]?.latestImportRunID == library.latestImportRunID
+      })
+      && !addsByteEvidence(incoming, to: existing)
+    {
       return existing
     }
 
@@ -21,7 +28,7 @@ public enum CatalogMerge {
     result.sourceItems = mergeSourceItems(existing.sourceItems, incoming.sourceItems)
     result.sourceResources = upserting(
       existing.sourceResources, with: incoming.sourceResources, id: \.id)
-    result.byteResources = appendingUnique(existing.byteResources, incoming.byteResources, id: \.id)
+    result.byteResources = mergeByteResources(existing.byteResources, incoming.byteResources)
     result.assetResourceLinks = upserting(
       existing.assetResourceLinks,
       with: incoming.assetResourceLinks,
@@ -111,7 +118,13 @@ public enum CatalogMerge {
       uniqueKeysWithValues: existing.byteResources.map { ($0.id, $0) })
     for value in incoming.byteResources {
       guard let current = byteResources[value.id] else { continue }
-      guard current == value else { throw CatalogStoreError.conflictingEntity("byte resource") }
+      guard
+        current.sha256 == value.sha256,
+        current.byteCount == value.byteCount,
+        current.verificationMethod == value.verificationMethod,
+        current.locallyMeasuredMD5 == nil || value.locallyMeasuredMD5 == nil
+          || current.locallyMeasuredMD5 == value.locallyMeasuredMD5
+      else { throw CatalogStoreError.conflictingEntity("byte resource") }
     }
 
     let links = Dictionary(uniqueKeysWithValues: existing.assetResourceLinks.map { ($0.id, $0) })
@@ -180,6 +193,56 @@ public enum CatalogMerge {
       && lhs.confidence == rhs.confidence
   }
 
+  private static func addsByteEvidence(
+    _ incoming: CatalogSnapshot,
+    to existing: CatalogSnapshot
+  ) -> Bool {
+    let existingBytes = Dictionary(
+      uniqueKeysWithValues: existing.byteResources.map { ($0.id, $0) })
+    if incoming.byteResources.contains(where: { incomingByte in
+      guard let current = existingBytes[incomingByte.id] else { return true }
+      return current.locallyMeasuredMD5 == nil && incomingByte.locallyMeasuredMD5 != nil
+    }) {
+      return true
+    }
+
+    let existingLinks = Dictionary(
+      uniqueKeysWithValues: existing.assetResourceLinks.map { ($0.sourceResourceID, $0) })
+    return incoming.assetResourceLinks.contains { incomingLink in
+      guard let current = existingLinks[incomingLink.sourceResourceID] else { return true }
+      return current.byteResourceID != incomingLink.byteResourceID
+        || current.sourceObservationID != incomingLink.sourceObservationID
+    }
+  }
+
+  private static func mergeByteResources(
+    _ existing: [ByteResource],
+    _ incoming: [ByteResource]
+  ) -> [ByteResource] {
+    var result = existing
+    var indices = Dictionary(uniqueKeysWithValues: result.indices.map { (result[$0].id, $0) })
+    for byteResource in incoming {
+      guard let index = indices[byteResource.id] else {
+        indices[byteResource.id] = result.count
+        result.append(byteResource)
+        continue
+      }
+      let current = result[index]
+      guard current.locallyMeasuredMD5 == nil, byteResource.locallyMeasuredMD5 != nil else {
+        continue
+      }
+      result[index] = ByteResource(
+        id: current.id,
+        sha256: current.sha256,
+        locallyMeasuredMD5: byteResource.locallyMeasuredMD5,
+        byteCount: current.byteCount,
+        verificationMethod: current.verificationMethod,
+        measuredAt: byteResource.measuredAt
+      )
+    }
+    return result
+  }
+
   private static func samePersonNameClaimIdentity(
     _ lhs: PersonNameClaim,
     _ rhs: PersonNameClaim
@@ -232,7 +295,8 @@ public enum CatalogMerge {
         id: current.id,
         provider: current.provider,
         externalAccountID: current.externalAccountID ?? library.externalAccountID,
-        displayName: library.displayName ?? current.displayName
+        displayName: library.displayName ?? current.displayName,
+        latestImportRunID: library.latestImportRunID ?? current.latestImportRunID
       )
     }
     return result
@@ -257,6 +321,7 @@ public enum CatalogMerge {
         externalID: current.externalID,
         firstObservedImportRunID: current.firstObservedImportRunID,
         latestObservationID: item.latestObservationID,
+        lastSeenImportRunID: item.lastSeenImportRunID,
         kind: current.kind == .unknown ? item.kind : current.kind
       )
     }

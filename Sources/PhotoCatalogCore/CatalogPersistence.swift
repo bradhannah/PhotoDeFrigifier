@@ -33,6 +33,7 @@ public enum CatalogStoreError: Error, Equatable, LocalizedError {
 }
 
 public enum CatalogJSONLStore {
+  private static let supportedLegacySchemaVersion = 2
   private static let processWriteLock = NSLock()
 
   public static func write(_ snapshot: CatalogSnapshot, to destination: URL) throws {
@@ -134,7 +135,10 @@ public enum CatalogJSONLStore {
           guard lineNumber == 1, !manifestSeen else { throw CatalogStoreError.invalidManifest }
           let manifest = try decoder.decode(CatalogManifestLine.self, from: data)
           guard manifest.containsPrivateMetadata else { throw CatalogStoreError.invalidManifest }
-          guard manifest.schemaVersion == CatalogSchema.currentVersion else {
+          guard
+            manifest.schemaVersion == CatalogSchema.currentVersion
+              || manifest.schemaVersion == supportedLegacySchemaVersion
+          else {
             throw CatalogStoreError.unsupportedSchema(manifest.schemaVersion)
           }
           snapshot = CatalogSnapshot(schemaVersion: manifest.schemaVersion)
@@ -193,8 +197,9 @@ public enum CatalogJSONLStore {
       throw CatalogStoreError.missingSummary
     }
     guard summary.matches(snapshot) else { throw CatalogStoreError.invalidSummary }
-    try validate(snapshot)
-    return snapshot
+    let currentSnapshot = migrateToCurrentSchema(snapshot)
+    try validate(currentSnapshot)
+    return currentSnapshot
   }
 
   public static func validate(_ snapshot: CatalogSnapshot) throws {
@@ -272,6 +277,23 @@ public enum CatalogJSONLStore {
       uniqueKeysWithValues: snapshot.sourceObservations.map { ($0.id, $0) }
     )
     let peopleByID = Dictionary(uniqueKeysWithValues: snapshot.sourcePeople.map { ($0.id, $0) })
+    let runsByLibraryID = Dictionary(grouping: snapshot.importRuns, by: \.sourceLibraryID)
+    let observationCountsByRunID = Dictionary(
+      grouping: snapshot.sourceObservations,
+      by: \.importRunID
+    ).mapValues(\.count)
+
+    guard
+      snapshot.sourceLibraries.allSatisfy({ library in
+        let hasRuns = runsByLibraryID[library.id]?.isEmpty == false
+        if !hasRuns { return library.latestImportRunID == nil }
+        return library.latestImportRunID.map {
+          runsByID[$0]?.sourceLibraryID == library.id
+        } == true
+      })
+    else {
+      throw CatalogStoreError.invalidReference("source library latest import")
+    }
 
     guard
       snapshot.importRuns.allSatisfy({ run in
@@ -281,8 +303,7 @@ public enum CatalogJSONLStore {
           && run.sourceSchemaVersion > 0
           && isSHA256(run.sourceFingerprintSHA256)
           && run.sourceRecordCount >= 0
-          && snapshot.sourceObservations.lazy.filter { $0.importRunID == run.id }.count
-            == run.sourceRecordCount
+          && observationCountsByRunID[run.id, default: 0] == run.sourceRecordCount
       })
     else {
       throw CatalogStoreError.invalidReference("import run observations")
@@ -291,6 +312,7 @@ public enum CatalogJSONLStore {
     guard
       snapshot.byteResources.allSatisfy({
         $0.byteCount >= 0 && $0.verificationMethod == .localSHA256 && isSHA256($0.sha256)
+          && ($0.locallyMeasuredMD5.map(isMD5) ?? true)
       })
     else {
       throw CatalogStoreError.invalidReference("byte resource identity")
@@ -325,6 +347,10 @@ public enum CatalogJSONLStore {
         else { return false }
         return latestObservation.sourceItemID == item.id
           && runsByID[latestObservation.importRunID]?.sourceLibraryID == item.sourceLibraryID
+          && latestObservation.importRunID == item.lastSeenImportRunID
+          && item.lastSeenImportRunID.map {
+            runsByID[$0]?.sourceLibraryID == item.sourceLibraryID
+          } != false
       })
     else {
       throw CatalogStoreError.invalidReference("source item")
@@ -377,13 +403,14 @@ public enum CatalogJSONLStore {
       kind: "verified source resource"
     )
     guard
-      snapshot.assetResourceLinks.allSatisfy({
+      snapshot.assetResourceLinks.allSatisfy({ link in
         guard
-          let sourceResource = resourcesByID[$0.sourceResourceID],
-          byteResourcesByID[$0.byteResourceID] != nil,
-          let observation = observationsByID[$0.sourceObservationID]
+          let sourceResource = resourcesByID[link.sourceResourceID],
+          let byteResource = byteResourcesByID[link.byteResourceID],
+          let observation = observationsByID[link.sourceObservationID]
         else { return false }
         return observation.sourceItemID == sourceResource.sourceItemID
+          && (sourceResource.byteCount.map { $0 == byteResource.byteCount } ?? true)
       })
     else {
       throw CatalogStoreError.invalidReference("verified resource")
@@ -441,6 +468,58 @@ public enum CatalogJSONLStore {
     }
   }
 
+  private static func migrateToCurrentSchema(_ snapshot: CatalogSnapshot) -> CatalogSnapshot {
+    guard snapshot.schemaVersion == supportedLegacySchemaVersion else { return snapshot }
+    let latestRunsByLibraryID = Dictionary(
+      grouping: snapshot.importRuns,
+      by: \.sourceLibraryID
+    ).mapValues { runs in
+      runs.max { lhs, rhs in
+        lhs.importedAt == rhs.importedAt ? lhs.id < rhs.id : lhs.importedAt < rhs.importedAt
+      }?.id
+    }
+    let observationsByID = Dictionary(
+      snapshot.sourceObservations.map { ($0.id, $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
+    let libraries = snapshot.sourceLibraries.map { library in
+      SourceLibrary(
+        id: library.id,
+        provider: library.provider,
+        externalAccountID: library.externalAccountID,
+        displayName: library.displayName,
+        latestImportRunID: library.latestImportRunID ?? latestRunsByLibraryID[library.id] ?? nil
+      )
+    }
+    let items = snapshot.sourceItems.map { item in
+      SourceItem(
+        id: item.id,
+        sourceLibraryID: item.sourceLibraryID,
+        externalID: item.externalID,
+        firstObservedImportRunID: item.firstObservedImportRunID,
+        latestObservationID: item.latestObservationID,
+        lastSeenImportRunID: item.lastSeenImportRunID
+          ?? observationsByID[item.latestObservationID]?.importRunID,
+        kind: item.kind
+      )
+    }
+    return CatalogSnapshot(
+      schemaVersion: CatalogSchema.currentVersion,
+      sourceLibraries: libraries,
+      importRuns: snapshot.importRuns,
+      assets: snapshot.assets,
+      sourceItems: items,
+      sourceResources: snapshot.sourceResources,
+      byteResources: snapshot.byteResources,
+      assetResourceLinks: snapshot.assetResourceLinks,
+      metadataClaims: snapshot.metadataClaims,
+      sourcePeople: snapshot.sourcePeople,
+      personNameClaims: snapshot.personNameClaims,
+      personMembershipClaims: snapshot.personMembershipClaims,
+      sourceObservations: snapshot.sourceObservations
+    )
+  }
+
   private static func write<T: Codable>(
     _ values: [T],
     recordType: String,
@@ -467,13 +546,20 @@ public enum CatalogJSONLStore {
   }
 
   private static func isSHA256(_ value: String) -> Bool {
-    value.count == 64
-      && value.unicodeScalars.allSatisfy { scalar in
-        switch scalar.value {
-        case 48...57, 65...70, 97...102: true
-        default: false
-        }
+    value.count == 64 && isHex(value)
+  }
+
+  private static func isMD5(_ value: String) -> Bool {
+    value.count == 32 && isHex(value)
+  }
+
+  private static func isHex(_ value: String) -> Bool {
+    value.unicodeScalars.allSatisfy { scalar in
+      switch scalar.value {
+      case 48...57, 65...70, 97...102: true
+      default: false
       }
+    }
   }
 
   private static func makeEncoder() -> JSONEncoder {

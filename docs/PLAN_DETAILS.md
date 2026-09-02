@@ -1,6 +1,6 @@
 # PhotoDeFrigifier Plan Details
 
-Last verified: 2026-09-01
+Last verified: 2026-09-02
 
 This is the durable record of product decisions, provider capabilities, risks,
 and implementation gates for PhotoDeFrigifier. Update it whenever a provider
@@ -350,8 +350,10 @@ are resolutions over assertions, not destructive replacements.
 ### Implemented Catalog Foundation
 
 - `PhotoCatalogCore` is independent of PhotoKit and the experimental cookie lab.
-- The current canonical JSONL schema is version 2. The Amazon private-JSONL
-  adapter is version 2; format or interpretation changes require version bumps.
+- The current canonical JSONL schema is version 3. Schema-2 catalogs are migrated
+  on read by reconstructing explicit current-run pointers; locally measured MD5
+  remains absent until a source is measured again. The Amazon private-JSONL
+  adapter is version 3; format or interpretation changes require version bumps.
 - Stable source identity is scoped by source library and provider external ID.
 - Import runs retain adapter/version, source schema, capture time, record count,
   source library, and SHA-256 of the source inventory. All of those fields scope
@@ -369,15 +371,55 @@ are resolutions over assertions, not destructive replacements.
   inventory updates the source item's latest observation while preserving prior
   observations and claims.
 - Canonical JSONL writes use a mode-`0600` temporary sibling, validate references
-  and record counts, append a completion summary, and replace the destination
-  only after synchronization.
+  and record counts, append a completion summary, synchronize the file, atomically
+  replace the destination, and synchronize the containing directory.
 - Catalog updates use both an in-process lock and an adjacent mode-`0600` file
   lock so concurrent app windows or processes cannot lose one another's runs.
+- The production app creates a `.photodefrigifier` Library Project package. Its
+  mode-`0600` manifest records source identity, import status, and security-scoped
+  bookmarks; its canonical catalog remains a separate private JSONL file inside
+  the package.
+- Project imports are serialized with a package lock and a private pending-import
+  journal. Opening a project recovers an interrupted manifest update from the
+  already-committed catalog before returning one locked manifest/catalog view.
+- Explicit match decisions, canonical people, source-person assignments, and
+  privacy categories are stored separately in an atomic mode-`0600` `review.json`.
+  Provider evidence remains unchanged when the user changes review state.
+- The filesystem adapter version 2 recursively inventories ordinary photo/video folders,
+  skips hidden entries, symlinks, and package descendants, streams each regular
+  file through SHA-256 and MD5, measures byte length, and reads available embedded
+  image dimensions and selected EXIF/TIFF/GPS claims. Extension recognition
+  includes QuickTime, WMV, and SVG, with ImageIO signature fallback for images
+  whose filename extension is misleading. It never modifies source files or
+  substitutes filesystem modification time for capture time.
+- Folder-relative paths remain source occurrence identifiers and preserve
+  hierarchy without automatically becoming albums. Changed bytes preserve the
+  occurrence while replacing its current verified-resource link; prior verified
+  bytes remain in the catalog as evidence.
+- Each source library records its explicit current import run. Items absent from
+  a later complete scan remain as historical evidence but are excluded from
+  automatic and reported-digest matching. Returning to an earlier fingerprint
+  restores that run as current rather than discarding the rescan as a duplicate.
 - A local SHA-256 verification is bound to the exact source observation whose
   bytes were read. A newer observation makes that verification ineligible for
   automatic matching until the bytes are measured again.
-- The production app can create a catalog from a completed Amazon inventory or
-  validate and merge into an existing catalog. It does not access Amazon cookies.
+- The production app can create/open a Library Project; add, replace, or rescan a
+  folder; import a completed Amazon inventory; and inventory the system Apple
+  Photos library after full PhotoKit authorization. It does not access Amazon
+  cookies. Google production import remains visibly staged but unavailable.
+- The dependency-free `ApplePhotosAdapter` includes hidden and burst assets,
+  inventories user and smart album memberships, maps PhotoKit resource roles,
+  and measures locally available resources with SHA-256 and MD5 while explicitly
+  disabling network access. iCloud-only and unreadable resources remain cataloged
+  without byte evidence and are reported separately.
+- An Apple source retains a bounded set of PhotoKit local-identifier anchors.
+  Rescans must overlap those anchors; switching the system library or opening the
+  project on a Mac with unrelated identifiers is rejected instead of merging
+  unrelated library-scoped identifiers under the existing source.
+- Matches presents exact SHA-256 groups and explicit Amazon MD5-and-size review
+  candidates. Confirmed relationships can propagate source People memberships to
+  canonical PhotoDeFrigifier people. Public PhotoKit does not expose or modify
+  Apple's native People identities.
 - **Observed 2026-09-01**: the retained 8,598-record private Amazon inventory
   imported and round-tripped successfully as 6,300 provisional assets, 68,375
   typed claims, 24 source-scoped People clusters, and 2,269 memberships.
@@ -402,6 +444,10 @@ are resolutions over assertions, not destructive replacements.
 - Same visual content with different encodings or metadata blocks.
 - Edited derivatives, bursts, and provider-generated copies.
 - Provider-reported MD5 or SHA values, even when reported sizes also agree.
+- Amazon-reported MD5 plus byte length may be bridged to a locally measured MD5
+  only as a persisted user review decision. If one MD5-and-size group contains
+  multiple distinct local SHA-256 values, it is withheld as ambiguous rather than
+  offered for confirmation.
 
 ## Metadata Portability
 
@@ -549,8 +595,8 @@ Lab code moves into the production solution only when:
 4. Google browser handoffs and Takeout shape inspector.
 5. Isolated Amazon cookie parser and read-only metadata probe.
 6. Sanitized report export and fixture workflow.
-7. Main application inventory/catalog foundation.
-8. Matching, conflict review, XMP, and manifests.
+7. Main application Library Project, folder inventory, and catalog foundation.
+8. Apple/Google production adapters, matching, conflict review, XMP, and manifests.
 9. Apple migration, Google-ready export, and privacy routing.
 10. Encrypted never-cloud backend and full recovery verification.
 

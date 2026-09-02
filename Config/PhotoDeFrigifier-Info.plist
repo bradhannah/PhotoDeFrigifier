@@ -4,6 +4,21 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>PhotoDeFrigifier Library Project</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.photodefrigifier.library-project</string>
+            </array>
+            <key>LSTypeIsPackage</key>
+            <true/>
+        </dict>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>PhotoDeFrigifier</string>
     <key>CFBundleExecutable</key>
@@ -28,5 +43,25 @@
     <string>PhotoDeFrigifier needs permission before it can import a user-approved migration plan.</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>PhotoDeFrigifier inventories your local Photos library to reconcile originals and metadata.</string>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.package</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>PhotoDeFrigifier Library Project</string>
+            <key>UTTypeIdentifier</key>
+            <string>com.photodefrigifier.library-project</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>photodefrigifier</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>

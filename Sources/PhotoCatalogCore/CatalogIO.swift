@@ -172,11 +172,22 @@ final class PrivateAtomicJSONLWriter {
     }
     guard renameResult == 0 else { throw CatalogIOError.invalidDestination }
     isFinalized = true
+    try synchronizeParentDirectory()
   }
 
   private func close() throws {
     guard !isClosed else { return }
     try handle.close()
     isClosed = true
+  }
+
+  private func synchronizeParentDirectory() throws {
+    let directoryPath = destination.deletingLastPathComponent().path
+    let descriptor = directoryPath.withCString {
+      Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    }
+    guard descriptor >= 0 else { throw CatalogIOError.invalidDestination }
+    defer { Darwin.close(descriptor) }
+    guard Darwin.fsync(descriptor) == 0 else { throw CatalogIOError.invalidDestination }
   }
 }

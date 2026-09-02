@@ -47,7 +47,7 @@ public enum AmazonCatalogImportError: Error, Equatable, LocalizedError {
 public struct AmazonCatalogImporter: URLCatalogImportAdapter {
   public let descriptor = CatalogAdapterDescriptor(
     id: "com.photodefrigifier.amazon-private-jsonl",
-    version: 2,
+    version: 3,
     provider: .amazon
   )
 
@@ -217,12 +217,6 @@ public struct AmazonCatalogImporter: URLCatalogImportAdapter {
       prefix: "library",
       components: [descriptor.provider.rawValue, accountID]
     )
-    let sourceLibrary = SourceLibrary(
-      id: sourceLibraryID,
-      provider: .amazon,
-      externalAccountID: accountID,
-      displayName: nil
-    )
     let importRunID = CatalogStableID.make(
       prefix: "import",
       components: [
@@ -232,6 +226,13 @@ public struct AmazonCatalogImporter: URLCatalogImportAdapter {
         sourceLibraryID,
         fingerprint,
       ]
+    )
+    let sourceLibrary = SourceLibrary(
+      id: sourceLibraryID,
+      provider: .amazon,
+      externalAccountID: accountID,
+      displayName: nil,
+      latestImportRunID: importRunID
     )
     let importRun = ImportRun(
       id: importRunID,
@@ -289,10 +290,6 @@ public struct AmazonCatalogImporter: URLCatalogImportAdapter {
         components: [sourceLibraryID, photo.externalID]
       )
       let assetID = CatalogStableID.make(prefix: "asset", components: [sourceItemID])
-      let resourceID = CatalogStableID.make(
-        prefix: "source-resource",
-        components: [sourceItemID, "primary"]
-      )
       let observationID = observationID(importRunID: importRunID, lineNumber: photo.lineNumber)
       let mediaType = photo.node.value(at: ["contentProperties", "contentType"])?.stringValue
       let kind: AssetKind
@@ -303,6 +300,11 @@ public struct AmazonCatalogImporter: URLCatalogImportAdapter {
       } else {
         kind = .unknown
       }
+      let resourceRole: ResourceRole = kind == .video ? .video : .primary
+      let resourceID = CatalogStableID.make(
+        prefix: "source-resource",
+        components: [sourceItemID, "primary"]
+      )
       let byteCount = photo.node.value(at: ["contentProperties", "size"])?.intValue
       let width = photo.node.value(at: ["contentProperties", "image", "width"])?.intValue
         .flatMap(Int.init(exactly:))
@@ -324,13 +326,14 @@ public struct AmazonCatalogImporter: URLCatalogImportAdapter {
           externalID: photo.externalID,
           firstObservedImportRunID: importRunID,
           latestObservationID: observationID,
+          lastSeenImportRunID: importRunID,
           kind: kind
         ))
       sourceResources.append(
         SourceResource(
           id: resourceID,
           sourceItemID: sourceItemID,
-          role: .primary,
+          role: resourceRole,
           originalFilename: photo.node["name"]?.stringValue,
           mediaType: mediaType,
           byteCount: byteCount,
