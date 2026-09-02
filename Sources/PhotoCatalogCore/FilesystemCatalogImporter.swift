@@ -210,6 +210,7 @@ public struct FilesystemCatalogImporter: URLCatalogImportAdapter {
         SourceResource(
           id: resourceID,
           sourceItemID: sourceItemID,
+          latestObservationID: observationID,
           role: file.candidate.role,
           originalFilename: file.candidate.url.lastPathComponent,
           mediaType: file.candidate.mediaType,

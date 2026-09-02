@@ -85,6 +85,12 @@ import Testing
     #expect(identity.amazonMD5ReviewCandidates.count == 1)
     #expect(identity.amazonMD5ReviewCandidates[0].localSourceResourceIDs.count == 1)
     #expect(identity.amazonMD5ReviewCandidates[0].amazonSourceResourceIDs.count == 2)
+    let duplicatePairs = CatalogDuplicateIndex(snapshot: merged, identityIndex: identity).pairs
+    #expect(duplicatePairs.count == 2)
+    #expect(
+      duplicatePairs.allSatisfy { pair in
+        (pair.first.provider == .amazon) != (pair.second.provider == .amazon)
+      })
   }
 }
 
@@ -206,23 +212,55 @@ import Testing
       at: Date(timeIntervalSinceReferenceDate: 1_000)
     )
     let canonicalPersonID = try #require(review.canonicalPeople.first?.id)
-    review.setPrivacyCategory(
-      .neverCloud,
+    review.setAppleRoute(
+      .exclude,
+      for: canonicalPersonID,
+      at: Date(timeIntervalSinceReferenceDate: 1_500)
+    )
+    review.setGoogleRoute(
+      .exclude,
       for: canonicalPersonID,
       at: Date(timeIntervalSinceReferenceDate: 1_500)
     )
     let beforeConfirmation = CatalogPeopleIndex(snapshot: merged, reviewState: review)
-    review.setDuplicateDisposition(
+    var legacyReview = review
+    legacyReview.setDuplicateDisposition(
       .confirmedDuplicate,
       for: candidate.id,
       at: Date(timeIntervalSinceReferenceDate: 2_000)
     )
-    let afterConfirmation = CatalogPeopleIndex(snapshot: merged, reviewState: review)
+    #expect(CatalogPeopleIndex(snapshot: merged, reviewState: legacyReview).memberships.count == 1)
+    let duplicateIndex = CatalogDuplicateIndex(snapshot: merged)
+    let firstPair = try #require(duplicateIndex.pairs.first)
+    legacyReview.setDuplicatePairDisposition(
+      .confirmedDuplicate,
+      first: firstPair.first,
+      second: firstPair.second
+    )
+    #expect(legacyReview.duplicateDecisions.map(\.candidateID) == [candidate.id])
+    for pair in duplicateIndex.pairs
+    where (pair.first.provider == .amazon) != (pair.second.provider == .amazon) {
+      review.setDuplicatePairDisposition(
+        .confirmedDuplicate,
+        first: pair.first,
+        second: pair.second
+      )
+    }
+    let afterConfirmation = CatalogPeopleIndex(
+      snapshot: merged,
+      reviewState: review,
+      duplicateIndex: duplicateIndex
+    )
 
     #expect(beforeConfirmation.memberships.count == 1)
     #expect(afterConfirmation.memberships.count == 3)
     #expect(afterConfirmation.memberships.count(where: \.isPropagated) == 2)
-    #expect(afterConfirmation.effectivePrivacyByAssetID.values.allSatisfy { $0 == .neverCloud })
+    #expect(
+      afterConfirmation.effectiveRoutingByAssetID.values.allSatisfy { routing in
+        routing.apple == .exclude && routing.google == .exclude
+      })
+
+    #expect(review.duplicateDecisions.isEmpty)
   }
 }
 
@@ -257,15 +295,21 @@ import Testing
       observationID: secondObservation.id,
       confidence: 1
     )
-    let candidate = try #require(
-      CatalogIdentityIndex(snapshot: merged).amazonMD5ReviewCandidates.first
-    )
+    _ = try #require(CatalogIdentityIndex(snapshot: merged).amazonMD5ReviewCandidates.first)
     var review = LibraryProjectReviewState()
     review.createCanonicalPerson(
       preferredName: "Fixture Person",
       sourcePersonID: sourcePersonID
     )
-    review.setDuplicateDisposition(.confirmedDuplicate, for: candidate.id)
+    let duplicateIndex = CatalogDuplicateIndex(snapshot: merged)
+    for pair in duplicateIndex.pairs
+    where (pair.first.provider == .amazon) != (pair.second.provider == .amazon) {
+      review.setDuplicatePairDisposition(
+        .confirmedDuplicate,
+        first: pair.first,
+        second: pair.second
+      )
+    }
 
     for claims in [
       merged.personMembershipClaims + [directClaim],
@@ -273,12 +317,154 @@ import Testing
     ] {
       merged.personMembershipClaims = claims
       let membership = try #require(
-        CatalogPeopleIndex(snapshot: merged, reviewState: review).memberships.first {
+        CatalogPeopleIndex(
+          snapshot: merged,
+          reviewState: review,
+          duplicateIndex: duplicateIndex
+        ).memberships.first {
           $0.assetID == secondAsset.id
         })
       #expect(!membership.isPropagated)
       #expect(membership.originatingClaimIDs.contains(directClaim.id))
     }
+  }
+}
+
+@Test func amazonCoverageUsesOnlyAttachedCurrentDownloadFolders() throws {
+  try withFixtureInventory(
+    digest: "900150983cd24fb0d6963f7d28e17f72",
+    byteSize: 3
+  ) { amazonURL in
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data("abc".utf8).write(to: directory.appendingPathComponent("downloaded.jpg"))
+    try Data("def".utf8).write(to: directory.appendingPathComponent("unmatched.jpg"))
+
+    let importedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+    let amazon = try AmazonCatalogImporter().importCatalog(from: amazonURL, importedAt: importedAt)
+    let local = try FilesystemCatalogImporter().importCatalog(
+      from: directory, importedAt: importedAt)
+    let merged = try CatalogMerge.merging(local, into: amazon)
+    let amazonLibrary = amazon.sourceLibraries[0]
+    let localLibrary = local.sourceLibraries[0]
+    var project = LibraryProject(createdAt: importedAt)
+    project.recordImport(
+      LibraryProjectSource(
+        id: amazonLibrary.id,
+        provider: .amazon,
+        kind: .amazonInventory,
+        externalAccountID: amazonLibrary.externalAccountID,
+        displayName: "Amazon Photos",
+        bookmarkData: Data("inventory-bookmark".utf8),
+        addedAt: importedAt,
+        lastImportedAt: importedAt,
+        itemCount: amazon.sourceItems.count
+      ),
+      at: importedAt
+    )
+    project.recordImport(
+      LibraryProjectSource(
+        id: localLibrary.id,
+        provider: .filesystem,
+        kind: .folder,
+        externalAccountID: localLibrary.externalAccountID,
+        displayName: "Amazon Downloads",
+        bookmarkData: Data("folder-bookmark".utf8),
+        addedAt: importedAt,
+        lastImportedAt: importedAt,
+        itemCount: local.sourceItems.count,
+        attachedToSourceID: amazonLibrary.id
+      ),
+      at: importedAt
+    )
+
+    let pendingCoverage = try #require(
+      AmazonDownloadCoverageIndex.build(snapshot: merged, project: project).first
+    )
+    #expect(pendingCoverage.attachedFolderSourceIDs == [localLibrary.id])
+    #expect(pendingCoverage.downloadedAmazonItemIDs.isEmpty)
+    #expect(pendingCoverage.candidateAmazonItemIDs.count == 2)
+    #expect(pendingCoverage.missingAmazonItemIDs.count == 2)
+    #expect(pendingCoverage.unmatchedLocalItemIDs.count == 1)
+    #expect(pendingCoverage.candidateIDs.count == 1)
+
+    let duplicateIndex = CatalogDuplicateIndex(snapshot: merged)
+    let crossProviderPairs = duplicateIndex.pairs.filter {
+      ($0.first.provider == .amazon) != ($0.second.provider == .amazon)
+    }
+    #expect(crossProviderPairs.count == 2)
+    var pairReview = LibraryProjectReviewState()
+    pairReview.setDuplicatePairDisposition(
+      .confirmedDuplicate,
+      first: crossProviderPairs[0].first,
+      second: crossProviderPairs[0].second
+    )
+    pairReview.setDuplicatePairDisposition(
+      .rejected,
+      first: crossProviderPairs[1].first,
+      second: crossProviderPairs[1].second
+    )
+    let partialCoverage = try #require(
+      AmazonDownloadCoverageIndex.build(
+        snapshot: merged,
+        project: project,
+        reviewState: pairReview,
+        duplicateIndex: duplicateIndex
+      ).first
+    )
+    #expect(partialCoverage.downloadedAmazonItemIDs.count == 1)
+    #expect(partialCoverage.missingAmazonItemIDs.count == 1)
+
+    var review = LibraryProjectReviewState()
+    for pair in crossProviderPairs {
+      review.setDuplicatePairDisposition(
+        .confirmedDuplicate,
+        first: pair.first,
+        second: pair.second
+      )
+    }
+    let confirmedCoverage = try #require(
+      AmazonDownloadCoverageIndex.build(
+        snapshot: merged,
+        project: project,
+        reviewState: review
+      ).first
+    )
+    #expect(confirmedCoverage.downloadedAmazonItemIDs.count == 2)
+    #expect(confirmedCoverage.missingAmazonItemIDs.isEmpty)
+
+    let previewIndex = CatalogPreviewIndex(snapshot: merged, project: project)
+    let amazonResourceID = try #require(amazon.sourceResources.first?.id)
+    let amazonPreview = try #require(
+      previewIndex.reference(forSourceResourceID: amazonResourceID)
+    )
+    guard case .amazonReviewCandidate(_, let localSourceResourceID) = amazonPreview.provenance
+    else {
+      Issue.record("Expected an attached Amazon download preview")
+      return
+    }
+    #expect(local.sourceResources.map(\.id).contains(localSourceResourceID))
+    let localPreview = try #require(
+      previewIndex.reference(forSourceResourceID: localSourceResourceID)
+    )
+    #expect(amazonPreview.cacheKey == localPreview.cacheKey)
+    guard
+      case .filesystem(_, _, _, let expectedSHA256) = localPreview.location
+    else {
+      Issue.record("Expected a verified filesystem preview")
+      return
+    }
+    let currentLink = try #require(
+      local.assetResourceLinks.first { $0.sourceResourceID == localSourceResourceID }
+    )
+    let matchedBytes = try #require(
+      local.byteResources.first { $0.id == currentLink.byteResourceID }
+    )
+    #expect(expectedSHA256 == matchedBytes.sha256)
   }
 }
 

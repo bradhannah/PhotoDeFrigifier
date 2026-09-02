@@ -10,10 +10,14 @@ final class LibraryProjectSession {
   private(set) var project: LibraryProject?
   private(set) var catalog = CatalogSnapshot()
   private(set) var identityIndex = CatalogIdentityIndex(snapshot: CatalogSnapshot())
+  private(set) var duplicateIndex = CatalogDuplicateIndex(snapshot: CatalogSnapshot())
+  private(set) var reviewPlan: LibraryProjectPlan?
   private(set) var reviewState = LibraryProjectReviewState()
   private(set) var isImporting = false
   private(set) var importProgressMessage: String?
   var notice: ProjectNotice?
+  @ObservationIgnored let previewStore = MediaPreviewStore()
+  @ObservationIgnored private(set) var previewIndex: CatalogPreviewIndex?
 
   var projectName: String {
     guard let projectURL else { return "Library Project" }
@@ -75,8 +79,8 @@ final class LibraryProjectSession {
       projectURL = destination
       self.project = project
       catalog = CatalogSnapshot()
-      identityIndex = CatalogIdentityIndex(snapshot: catalog)
       reviewState = LibraryProjectReviewState()
+      refreshDerivedIndexes()
       notice = nil
     } catch {
       notice = ProjectNotice(
@@ -114,8 +118,8 @@ final class LibraryProjectSession {
       projectURL = url
       project = contents.project
       catalog = contents.catalog
-      identityIndex = CatalogIdentityIndex(snapshot: catalog)
       reviewState = contents.reviewState
+      refreshDerivedIndexes()
       notice = nil
     } catch {
       notice = ProjectNotice(
@@ -153,6 +157,20 @@ final class LibraryProjectSession {
     panel.allowsMultipleSelection = false
     guard panel.runModal() == .OK, let url = panel.url else { return }
     importSource(at: url, kind: .folder, existingSource: source)
+  }
+
+  func chooseAmazonDownloads(for source: LibraryProjectSource) {
+    guard source.kind == .amazonInventory else { return }
+    let panel = NSOpenPanel()
+    panel.title = "Attach Amazon Downloads"
+    panel.message =
+      "Choose a folder containing Amazon media. Missing downloads remain visible in coverage reports."
+    panel.prompt = "Attach Folder"
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    importSource(at: url, kind: .folder, attachedToSourceID: source.id)
   }
 
   func chooseAmazonInventory() {
@@ -213,6 +231,20 @@ final class LibraryProjectSession {
     }
   }
 
+  func setDuplicatePairDisposition(
+    _ disposition: DuplicateReviewDisposition?,
+    first: DuplicateOccurrence,
+    second: DuplicateOccurrence
+  ) {
+    updateReviewState { state in
+      state.setDuplicatePairDisposition(
+        disposition,
+        first: first,
+        second: second
+      )
+    }
+  }
+
   func createCanonicalPerson(from sourcePersonID: String, preferredName: String) {
     updateReviewState { state in
       state.createCanonicalPerson(
@@ -222,9 +254,56 @@ final class LibraryProjectSession {
     }
   }
 
-  func setPrivacyCategory(_ category: PersonPrivacyCategory, for personID: String) {
+  func setAppleRoute(_ route: ApplePersonRoute?, for personID: String) {
     updateReviewState { state in
-      state.setPrivacyCategory(category, for: personID)
+      state.setAppleRoute(route, for: personID)
+    }
+  }
+
+  func setGoogleRoute(_ route: GooglePersonRoute?, for personID: String) {
+    updateReviewState { state in
+      state.setGoogleRoute(route, for: personID)
+    }
+  }
+
+  func chooseDestination(_ slot: LibraryProjectDestinationSlot) {
+    let panel = NSOpenPanel()
+    panel.title = slot.pickerTitle
+    panel.message = slot.pickerMessage
+    panel.prompt = "Choose Directory"
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    guard panel.runModal() == .OK, let directory = panel.url else { return }
+
+    do {
+      let bookmarkData = try directory.bookmarkData(
+        options: [.withSecurityScope],
+        includingResourceValuesForKeys: nil,
+        relativeTo: nil
+      )
+      let volumeUUID = try directory.resourceValues(forKeys: [.volumeUUIDStringKey])
+        .volumeUUIDString
+      let destination = ProjectDirectoryDestination(
+        displayName: directory.lastPathComponent,
+        directoryBookmarkData: bookmarkData,
+        volumeUUID: volumeUUID,
+        configuredAt: Date()
+      )
+      updateProject { project in
+        project.setDestination(destination, for: slot, at: Date())
+      }
+    } catch {
+      notice = ProjectNotice(
+        title: "Destination Could Not Be Saved",
+        message: "Choose an accessible directory and try again. No media was written."
+      )
+    }
+  }
+
+  func clearDestination(_ slot: LibraryProjectDestinationSlot) {
+    updateProject { project in
+      project.setDestination(nil, for: slot, at: Date())
     }
   }
 
@@ -272,7 +351,8 @@ final class LibraryProjectSession {
   private func importSource(
     at sourceURL: URL,
     kind: LibraryProjectSourceKind,
-    existingSource: LibraryProjectSource? = nil
+    existingSource: LibraryProjectSource? = nil,
+    attachedToSourceID: String? = nil
   ) {
     guard !isImporting, let projectURL, project != nil else { return }
     let bookmarkData: Data
@@ -341,7 +421,8 @@ final class LibraryProjectSession {
             bookmarkData: bookmarkData,
             addedAt: importedAt,
             lastImportedAt: importedAt,
-            itemCount: incoming.sourceItems.count
+            itemCount: incoming.sourceItems.count,
+            attachedToSourceID: attachedToSourceID ?? existingSource?.attachedToSourceID
           )
           return try LibraryProjectStore.importCatalog(
             incoming,
@@ -352,8 +433,8 @@ final class LibraryProjectSession {
         }.value
         project = result.project
         catalog = result.catalog
-        identityIndex = CatalogIdentityIndex(snapshot: catalog)
         reviewState = result.reviewState
+        refreshDerivedIndexes()
       } catch {
         notice = ProjectNotice(
           title: "Source Import Failed",
@@ -447,8 +528,8 @@ final class LibraryProjectSession {
         }.value
         project = result.project
         catalog = result.catalog
-        identityIndex = CatalogIdentityIndex(snapshot: catalog)
         reviewState = result.reviewState
+        refreshDerivedIndexes()
       } catch {
         notice = ProjectNotice(
           title: "Apple Photos Import Failed",
@@ -488,6 +569,7 @@ final class LibraryProjectSession {
     guard let projectURL else { return }
     do {
       reviewState = try LibraryProjectStore.updateReviewState(at: projectURL, update: update)
+      refreshReviewPlan()
       notice = nil
     } catch {
       notice = ProjectNotice(
@@ -495,6 +577,44 @@ final class LibraryProjectSession {
         message: safeMessage(
           for: error,
           fallback: "The Library Project is unchanged. Try the review action again."
+        )
+      )
+    }
+  }
+
+  private func refreshDerivedIndexes() {
+    identityIndex = CatalogIdentityIndex(snapshot: catalog)
+    duplicateIndex = CatalogDuplicateIndex(snapshot: catalog, identityIndex: identityIndex)
+    previewIndex = project.map {
+      CatalogPreviewIndex(snapshot: catalog, project: $0, identityIndex: identityIndex)
+    }
+    refreshReviewPlan()
+  }
+
+  private func refreshReviewPlan() {
+    reviewPlan = project.map {
+      LibraryProjectPlan(
+        project: $0,
+        catalog: catalog,
+        reviewState: reviewState,
+        identityIndex: identityIndex,
+        duplicateIndex: duplicateIndex
+      )
+    }
+  }
+
+  private func updateProject(_ update: (inout LibraryProject) throws -> Void) {
+    guard let projectURL else { return }
+    do {
+      project = try LibraryProjectStore.updateProject(at: projectURL, update: update)
+      refreshDerivedIndexes()
+      notice = nil
+    } catch {
+      notice = ProjectNotice(
+        title: "Project Change Could Not Be Saved",
+        message: safeMessage(
+          for: error,
+          fallback: "The Library Project is unchanged. Try again."
         )
       )
     }
@@ -523,6 +643,25 @@ extension LibraryProjectSourceKind {
     case .amazonInventory: "Amazon Photos"
     case .applePhotos: "Apple Photos"
     case .folder: url.lastPathComponent
+    }
+  }
+}
+
+extension LibraryProjectDestinationSlot {
+  fileprivate var pickerTitle: String {
+    switch self {
+    case .googleReadyExport: "Choose Google-ready Export Location"
+    case .archiveOne: "Choose First Archive Location"
+    case .archiveTwo: "Choose Second Archive Location"
+    }
+  }
+
+  fileprivate var pickerMessage: String {
+    switch self {
+    case .googleReadyExport:
+      "PhotoDeFrigifier will later create a reviewed export inside this directory."
+    case .archiveOne, .archiveTwo:
+      "Choose an encrypted archive location. Configuration alone does not verify protection."
     }
   }
 }

@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public enum LibraryProjectSchema {
-  public static let currentVersion = 1
+  public static let currentVersion = 2
 }
 
 public enum LibraryProjectSourceKind: String, Codable, Sendable {
@@ -25,6 +25,7 @@ public struct LibraryProjectSource: Codable, Equatable, Identifiable, Sendable {
   public let networkRequiredResourceCount: Int?
   public let unavailableResourceCount: Int?
   public let identityAnchorExternalIDs: [String]?
+  public let attachedToSourceID: String?
 
   public init(
     id: String,
@@ -39,7 +40,8 @@ public struct LibraryProjectSource: Codable, Equatable, Identifiable, Sendable {
     measuredResourceCount: Int? = nil,
     networkRequiredResourceCount: Int? = nil,
     unavailableResourceCount: Int? = nil,
-    identityAnchorExternalIDs: [String]? = nil
+    identityAnchorExternalIDs: [String]? = nil,
+    attachedToSourceID: String? = nil
   ) {
     self.id = id
     self.provider = provider
@@ -54,6 +56,65 @@ public struct LibraryProjectSource: Codable, Equatable, Identifiable, Sendable {
     self.networkRequiredResourceCount = networkRequiredResourceCount
     self.unavailableResourceCount = unavailableResourceCount
     self.identityAnchorExternalIDs = identityAnchorExternalIDs
+    self.attachedToSourceID = attachedToSourceID
+  }
+}
+
+public enum LibraryProjectDestinationSlot: String, Codable, CaseIterable, Sendable {
+  case googleReadyExport
+  case archiveOne
+  case archiveTwo
+}
+
+public struct ProjectDirectoryDestination: Codable, Equatable, Sendable {
+  public let displayName: String
+  public let directoryBookmarkData: Data
+  public let volumeUUID: String?
+  public let configuredAt: Date
+
+  public init(
+    displayName: String,
+    directoryBookmarkData: Data,
+    volumeUUID: String?,
+    configuredAt: Date
+  ) {
+    self.displayName = displayName
+    self.directoryBookmarkData = directoryBookmarkData
+    self.volumeUUID = volumeUUID
+    self.configuredAt = configuredAt
+  }
+}
+
+public struct LibraryProjectDestinations: Codable, Equatable, Sendable {
+  public var googleReadyExport: ProjectDirectoryDestination?
+  public var archiveOne: ProjectDirectoryDestination?
+  public var archiveTwo: ProjectDirectoryDestination?
+
+  public init(
+    googleReadyExport: ProjectDirectoryDestination? = nil,
+    archiveOne: ProjectDirectoryDestination? = nil,
+    archiveTwo: ProjectDirectoryDestination? = nil
+  ) {
+    self.googleReadyExport = googleReadyExport
+    self.archiveOne = archiveOne
+    self.archiveTwo = archiveTwo
+  }
+
+  public subscript(slot: LibraryProjectDestinationSlot) -> ProjectDirectoryDestination? {
+    get {
+      switch slot {
+      case .googleReadyExport: googleReadyExport
+      case .archiveOne: archiveOne
+      case .archiveTwo: archiveTwo
+      }
+    }
+    set {
+      switch slot {
+      case .googleReadyExport: googleReadyExport = newValue
+      case .archiveOne: archiveOne = newValue
+      case .archiveTwo: archiveTwo = newValue
+      }
+    }
   }
 }
 
@@ -62,17 +123,20 @@ public struct LibraryProject: Codable, Equatable, Sendable {
   public let createdAt: Date
   public private(set) var updatedAt: Date
   public private(set) var sources: [LibraryProjectSource]
+  public private(set) var destinations: LibraryProjectDestinations
 
   public init(
     schemaVersion: Int = LibraryProjectSchema.currentVersion,
     createdAt: Date = Date(),
     updatedAt: Date? = nil,
-    sources: [LibraryProjectSource] = []
+    sources: [LibraryProjectSource] = [],
+    destinations: LibraryProjectDestinations = LibraryProjectDestinations()
   ) {
     self.schemaVersion = schemaVersion
     self.createdAt = createdAt
     self.updatedAt = updatedAt ?? createdAt
     self.sources = sources
+    self.destinations = destinations
   }
 
   public mutating func recordImport(_ source: LibraryProjectSource, at date: Date) {
@@ -91,7 +155,8 @@ public struct LibraryProject: Codable, Equatable, Sendable {
         measuredResourceCount: source.measuredResourceCount,
         networkRequiredResourceCount: source.networkRequiredResourceCount,
         unavailableResourceCount: source.unavailableResourceCount,
-        identityAnchorExternalIDs: source.identityAnchorExternalIDs
+        identityAnchorExternalIDs: source.identityAnchorExternalIDs,
+        attachedToSourceID: source.attachedToSourceID
       )
     } else {
       sources.append(source)
@@ -100,6 +165,15 @@ public struct LibraryProject: Codable, Equatable, Sendable {
       if $0.addedAt != $1.addedAt { return $0.addedAt < $1.addedAt }
       return $0.id < $1.id
     }
+    updatedAt = date
+  }
+
+  public mutating func setDestination(
+    _ destination: ProjectDirectoryDestination?,
+    for slot: LibraryProjectDestinationSlot,
+    at date: Date
+  ) {
+    destinations[slot] = destination
     updatedAt = date
   }
 }
@@ -196,6 +270,20 @@ public enum LibraryProjectStore {
     try withProjectLock(at: directory) {
       try recoverPendingImportIfNeeded(at: directory)
       try writeManifest(project, to: directory)
+    }
+  }
+
+  public static func updateProject(
+    at directory: URL,
+    update: (inout LibraryProject) throws -> Void
+  ) throws -> LibraryProject {
+    try validateDirectory(directory)
+    return try withProjectLock(at: directory) {
+      try recoverPendingImportIfNeeded(at: directory)
+      var project = try readManifest(from: directory)
+      try update(&project)
+      try writeManifest(project, to: directory)
+      return project
     }
   }
 
@@ -303,7 +391,20 @@ public enum LibraryProjectStore {
               && anchors.allSatisfy { !$0.isEmpty }
           } != false
       }),
-      Set(project.sources.map(\.id)).count == project.sources.count
+      Set(project.sources.map(\.id)).count == project.sources.count,
+      project.sources.allSatisfy({ source in
+        guard let attachedToSourceID = source.attachedToSourceID else { return true }
+        guard
+          source.kind == .folder,
+          let target = project.sources.first(where: { $0.id == attachedToSourceID })
+        else { return false }
+        return target.kind == .amazonInventory && target.provider == .amazon
+      }),
+      LibraryProjectDestinationSlot.allCases.allSatisfy({ slot in
+        guard let destination = project.destinations[slot] else { return true }
+        return !destination.displayName.isEmpty && !destination.directoryBookmarkData.isEmpty
+          && destination.configuredAt >= project.createdAt
+      })
     else {
       throw LibraryProjectStoreError.invalidProject
     }
@@ -360,7 +461,22 @@ public enum LibraryProjectStore {
   }
 
   private static func readManifest(from directory: URL) throws -> LibraryProject {
-    let project: LibraryProject = try readJSON(from: manifestURL(for: directory))
+    let url = manifestURL(for: directory)
+    let header: LibraryProjectSchemaHeader = try readJSON(from: url)
+    let project: LibraryProject
+    switch header.schemaVersion {
+    case 1:
+      let legacy: LegacyLibraryProjectV1 = try readJSON(from: url)
+      project = LibraryProject(
+        createdAt: legacy.createdAt,
+        updatedAt: legacy.updatedAt,
+        sources: legacy.sources
+      )
+    case LibraryProjectSchema.currentVersion:
+      project = try readJSON(from: url)
+    default:
+      throw LibraryProjectStoreError.unsupportedSchema(header.schemaVersion)
+    }
     try validate(project)
     return project
   }
@@ -375,9 +491,27 @@ public enum LibraryProjectStore {
     guard FileManager.default.fileExists(atPath: url.path) else {
       return LibraryProjectReviewState()
     }
-    let state: LibraryProjectReviewState = try readJSON(from: url)
+    let header: LibraryProjectReviewSchemaHeader = try readJSON(from: url)
+    let state: LibraryProjectReviewState
+    switch header.schemaVersion {
+    case 1:
+      state = LibraryProjectReviewState(
+        migrating: try readJSON(LegacyLibraryProjectReviewStateV1.self, from: url)
+      )
+    case LibraryProjectReviewSchema.currentVersion:
+      state = try readJSON(from: url)
+    default:
+      throw LibraryProjectStoreError.unsupportedReviewSchema(header.schemaVersion)
+    }
     try LibraryProjectReviewValidator.validate(state)
     return state
+  }
+
+  private static func readJSON<Value: Decodable>(
+    _ type: Value.Type,
+    from url: URL
+  ) throws -> Value {
+    try readJSON(from: url)
   }
 
   private static func readJSON<Value: Decodable>(from url: URL) throws -> Value {
@@ -426,4 +560,18 @@ private struct PendingProjectImport: Codable {
   let importRunIDs: [String]
   let expectedLatestImportRunID: String?
   let importedAt: Date
+}
+
+private struct LibraryProjectSchemaHeader: Decodable {
+  let schemaVersion: Int
+}
+
+private struct LibraryProjectReviewSchemaHeader: Decodable {
+  let schemaVersion: Int
+}
+
+private struct LegacyLibraryProjectV1: Decodable {
+  let createdAt: Date
+  let updatedAt: Date
+  let sources: [LibraryProjectSource]
 }

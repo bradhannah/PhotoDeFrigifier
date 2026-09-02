@@ -333,6 +333,7 @@ public struct AmazonCatalogImporter: URLCatalogImportAdapter {
         SourceResource(
           id: resourceID,
           sourceItemID: sourceItemID,
+          latestObservationID: observationID,
           role: resourceRole,
           originalFilename: photo.node["name"]?.stringValue,
           mediaType: mediaType,

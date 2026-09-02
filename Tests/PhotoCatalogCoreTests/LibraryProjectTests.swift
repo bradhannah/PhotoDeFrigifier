@@ -41,6 +41,84 @@ import Testing
   }
 }
 
+@Test func libraryProjectMigratesSchemaOneWithEmptyDestinations() throws {
+  try withLibraryProjectParent { parent in
+    let projectURL = parent.appendingPathComponent("Legacy.photodefrigifier", isDirectory: true)
+    _ = try LibraryProjectStore.create(
+      at: projectURL,
+      date: Date(timeIntervalSinceReferenceDate: 1_000)
+    )
+    let manifestURL = LibraryProjectStore.manifestURL(for: projectURL)
+    let current = try String(contentsOf: manifestURL, encoding: .utf8)
+    let legacy = current.replacingOccurrences(
+      of: "\"schemaVersion\":\(LibraryProjectSchema.currentVersion)",
+      with: "\"schemaVersion\":1"
+    )
+    try Data(legacy.utf8).write(to: manifestURL)
+
+    let migrated = try LibraryProjectStore.read(from: projectURL)
+
+    #expect(migrated.schemaVersion == LibraryProjectSchema.currentVersion)
+    #expect(migrated.sources.isEmpty)
+    #expect(migrated.destinations == LibraryProjectDestinations())
+  }
+}
+
+@Test func libraryProjectRejectsFolderAttachedToMissingAmazonSource() throws {
+  try withLibraryProjectParent { parent in
+    let projectURL = parent.appendingPathComponent("Attachment.photodefrigifier", isDirectory: true)
+    let createdAt = Date(timeIntervalSinceReferenceDate: 1_000)
+    var project = try LibraryProjectStore.create(at: projectURL, date: createdAt)
+    project.recordImport(
+      LibraryProjectSource(
+        id: "folder-source",
+        provider: .filesystem,
+        kind: .folder,
+        displayName: "Downloads",
+        bookmarkData: Data("bookmark".utf8),
+        addedAt: createdAt,
+        lastImportedAt: createdAt,
+        itemCount: 1,
+        attachedToSourceID: "missing-amazon-source"
+      ),
+      at: createdAt
+    )
+
+    #expect(throws: LibraryProjectStoreError.invalidProject) {
+      try LibraryProjectStore.write(project, to: projectURL)
+    }
+  }
+}
+
+@Test func projectDestinationsRoundTripWithPrivateManifest() throws {
+  try withLibraryProjectParent { parent in
+    let projectURL = parent.appendingPathComponent(
+      "Destinations.photodefrigifier", isDirectory: true)
+    let date = Date(timeIntervalSinceReferenceDate: 1_000)
+    _ = try LibraryProjectStore.create(at: projectURL, date: date)
+
+    let updated = try LibraryProjectStore.updateProject(at: projectURL) { project in
+      project.setDestination(
+        ProjectDirectoryDestination(
+          displayName: "Archive One",
+          directoryBookmarkData: Data("private-bookmark".utf8),
+          volumeUUID: "volume-one",
+          configuredAt: date
+        ),
+        for: .archiveOne,
+        at: date
+      )
+    }
+
+    #expect(updated.destinations.archiveOne?.volumeUUID == "volume-one")
+    #expect(try LibraryProjectStore.read(from: projectURL) == updated)
+    #expect(
+      try fileMode(LibraryProjectStore.manifestURL(for: projectURL))
+        == mode_t(S_IRUSR | S_IWUSR)
+    )
+  }
+}
+
 @Test func libraryProjectRefreshPreservesOriginalAddedDate() throws {
   let createdAt = Date(timeIntervalSinceReferenceDate: 1_000)
   let firstImport = Date(timeIntervalSinceReferenceDate: 2_000)
@@ -328,6 +406,36 @@ import Testing
       try fileMode(LibraryProjectStore.reviewURL(for: projectURL))
         == mode_t(S_IRUSR | S_IWUSR)
     )
+  }
+}
+
+@Test func reviewSchemaOneMigratesToExplicitRoutesWithoutRewritingOnOpen() throws {
+  try withLibraryProjectParent { parent in
+    let projectURL = parent.appendingPathComponent(
+      "Legacy Review.photodefrigifier", isDirectory: true)
+    _ = try LibraryProjectStore.create(at: projectURL)
+    let reviewURL = LibraryProjectStore.reviewURL(for: projectURL)
+    let legacy = Data(
+      """
+      {"canonicalPeople":[{"aliases":[],"createdAt":"2001-01-01T00:00:00Z","id":"person-1","preferredName":"Fixture Person","privacyCategory":"privateCloudAcceptable","sourcePersonIDs":["source-person-1"],"updatedAt":"2001-01-01T00:00:00Z"}],"duplicateDecisions":[],"schemaVersion":1}
+      """.utf8
+    )
+    try legacy.write(to: reviewURL)
+
+    let loaded = try LibraryProjectStore.load(from: projectURL).reviewState
+
+    #expect(loaded.schemaVersion == LibraryProjectReviewSchema.currentVersion)
+    #expect(loaded.canonicalPeople[0].routing.apple == .hidden)
+    #expect(loaded.canonicalPeople[0].routing.google == nil)
+    #expect(try Data(contentsOf: reviewURL) == legacy)
+
+    _ = try LibraryProjectStore.updateReviewState(at: projectURL) { state in
+      state.setGoogleRoute(.exclude, for: "person-1")
+    }
+    let rewritten = try JSONSerialization.jsonObject(with: Data(contentsOf: reviewURL))
+    let object = try #require(rewritten as? [String: Any])
+    #expect(object["schemaVersion"] as? Int == LibraryProjectReviewSchema.currentVersion)
+    #expect(try fileMode(reviewURL) == mode_t(S_IRUSR | S_IWUSR))
   }
 }
 

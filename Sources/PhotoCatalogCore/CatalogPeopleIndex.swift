@@ -20,28 +20,44 @@ public struct CanonicalPersonMembership: Equatable, Identifiable, Sendable {
   }
 }
 
+public struct EffectivePersonRouting: Equatable, Sendable {
+  public let canonicalPersonIDs: [String]
+  public let apple: ApplePersonRoute?
+  public let google: GooglePersonRoute?
+
+  public init(
+    canonicalPersonIDs: [String],
+    apple: ApplePersonRoute?,
+    google: GooglePersonRoute?
+  ) {
+    self.canonicalPersonIDs = canonicalPersonIDs
+    self.apple = apple
+    self.google = google
+  }
+}
+
 public struct CatalogPeopleIndex: Equatable, Sendable {
   public let memberships: [CanonicalPersonMembership]
-  public let effectivePrivacyByAssetID: [String: PersonPrivacyCategory]
+  public let effectiveRoutingByAssetID: [String: EffectivePersonRouting]
 
   public init(
     snapshot: CatalogSnapshot,
     reviewState: LibraryProjectReviewState,
-    identityIndex: CatalogIdentityIndex? = nil
+    identityIndex: CatalogIdentityIndex? = nil,
+    duplicateIndex: CatalogDuplicateIndex? = nil
   ) {
     let identity = identityIndex ?? CatalogIdentityIndex(snapshot: snapshot)
-    let confirmedCandidateIDs = Set(
-      reviewState.duplicateDecisions.compactMap { decision in
-        decision.disposition == .confirmedDuplicate ? decision.candidateID : nil
-      })
+    let duplicates =
+      duplicateIndex
+      ?? CatalogDuplicateIndex(snapshot: snapshot, identityIndex: identity)
+    let resolutions = CatalogDuplicateResolutionIndex(
+      duplicateIndex: duplicates,
+      reviewState: reviewState
+    )
     var resourceGraph: [String: Set<String>] = [:]
-    for match in identity.automaticMatches {
-      Self.connect(match.sourceResourceIDs, graph: &resourceGraph)
-    }
-    for candidate in identity.amazonMD5ReviewCandidates
-    where confirmedCandidateIDs.contains(candidate.id) {
+    for pair in duplicates.pairs where resolutions.establishesSafeIdentity(for: pair) {
       Self.connect(
-        candidate.localSourceResourceIDs + candidate.amazonSourceResourceIDs,
+        [pair.first.sourceResourceID, pair.second.sourceResourceID],
         graph: &resourceGraph
       )
     }
@@ -51,7 +67,12 @@ public struct CatalogPeopleIndex: Equatable, Sendable {
     let items = Dictionary(uniqueKeysWithValues: snapshot.sourceItems.map { ($0.id, $0) })
     let observations = Dictionary(
       uniqueKeysWithValues: snapshot.sourceObservations.map { ($0.id, $0) })
-    let resourcesByItemID = Dictionary(grouping: snapshot.sourceResources, by: \.sourceItemID)
+    let resourcesByItemID = Dictionary(
+      grouping: snapshot.sourceResources.filter { resource in
+        resource.latestObservationID == items[resource.sourceItemID]?.latestObservationID
+      },
+      by: \.sourceItemID
+    )
     let assetsByItemID = snapshot.assets.reduce(into: [String: String]()) { result, asset in
       for itemID in asset.sourceItemIDs { result[itemID] = asset.id }
     }
@@ -127,14 +148,25 @@ public struct CatalogPeopleIndex: Equatable, Sendable {
 
     let peopleByID = Dictionary(
       uniqueKeysWithValues: reviewState.canonicalPeople.map { ($0.id, $0) })
-    effectivePrivacyByAssetID = memberships.reduce(into: [:]) { result, membership in
-      guard let category = peopleByID[membership.canonicalPersonID]?.privacyCategory else { return }
-      if let current = result[membership.assetID],
-        current.restrictionLevel >= category.restrictionLevel
-      {
-        return
-      }
-      result[membership.assetID] = category
+    let membershipsByAssetID = Dictionary(grouping: memberships, by: \.assetID)
+    effectiveRoutingByAssetID = membershipsByAssetID.mapValues { assetMemberships in
+      let personIDs = Array(Set(assetMemberships.map(\.canonicalPersonID))).sorted()
+      let people = personIDs.compactMap { peopleByID[$0] }
+      let appleRoutes = people.compactMap(\.routing.apple)
+      let googleRoutes = people.compactMap(\.routing.google)
+      let apple =
+        appleRoutes.count == people.count
+        ? appleRoutes.max { $0.restrictionLevel < $1.restrictionLevel }
+        : nil
+      let google: GooglePersonRoute? =
+        googleRoutes.count == people.count
+        ? (googleRoutes.contains(.exclude) ? .exclude : .include)
+        : nil
+      return EffectivePersonRouting(
+        canonicalPersonIDs: personIDs,
+        apple: apple,
+        google: google
+      )
     }
   }
 

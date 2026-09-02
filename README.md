@@ -34,7 +34,7 @@ make run-lab
 from the production app's Advanced section. Use `make run-lab` to open the lab
 directly.
 
-The initial milestone uses only Apple system frameworks and Swift Package
+The application uses only Apple system frameworks and Swift Package
 Manager. It does not require provider developer accounts or third-party tools.
 
 Provider Access Lab can create a complete private Amazon metadata inventory as
@@ -53,6 +53,11 @@ source files, measure SHA-256 and MD5 in one streaming pass, and read embedded
 image metadata when available. A folder source can be replaced while preserving
 its source identity and scan history.
 
+An Amazon inventory can own several attached download-folder sources. The app
+tracks confirmed downloaded items, missing inventory items, candidate local
+matches, and unmatched local files without treating provider-reported MD5 as
+verified identity.
+
 Apple scans include hidden and burst assets, user and smart album memberships,
 and compound resources such as RAW and Live Photo pairs. Locally available
 resources are measured without network access; iCloud-only and unreadable
@@ -67,3 +72,17 @@ People claims into PhotoDeFrigifier-managed canonical people and privacy
 categories without attempting to change Apple Photos People data. Project files
 retain raw provider records and identifying metadata, are written atomically with
 mode `0600`, and still require encrypted or otherwise private storage.
+
+Matches compares memory-only visual previews side by side. Exact SHA-256 pairs
+are automatic and cannot be rejected; Amazon MD5/type, normalized filename, and
+matching-stem pairs require explicit review bound to the current observations.
+Apple previews are marked as asset renditions because public PhotoKit cannot
+promise a resource-specific thumbnail. Local previews are opened beneath their
+security-scoped source without following symlinks and are revalidated against the
+cataloged SHA-256 before decoding.
+
+People routing is explicit per destination: Apple `Visible`, `Hidden`, or
+`Exclude`, and Google `Include` or `Exclude`. The most restrictive assigned
+person wins. Destinations persist a Google-ready export location and two distinct
+archive locations. Review derives a non-destructive plan and blockers; this
+version performs no move, upload, deletion, PhotoKit write, or archive operation.

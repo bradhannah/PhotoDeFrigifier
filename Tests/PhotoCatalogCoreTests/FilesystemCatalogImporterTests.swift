@@ -96,6 +96,127 @@ import Testing
   }
 }
 
+@Test func duplicateIndexSeparatesExactNamesFromMatchingStems() throws {
+  try withTemporaryDirectory { directory in
+    let firstDirectory = directory.appendingPathComponent("first", isDirectory: true)
+    let secondDirectory = directory.appendingPathComponent("second", isDirectory: true)
+    try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+    try Data("first".utf8).write(to: firstDirectory.appendingPathComponent("Shared.JPG"))
+    try Data("second".utf8).write(to: secondDirectory.appendingPathComponent("shared.jpg"))
+    try Data("third".utf8).write(to: firstDirectory.appendingPathComponent("alternate.heic"))
+    try Data("fourth".utf8).write(to: secondDirectory.appendingPathComponent("alternate.jpg"))
+
+    let snapshot = try FilesystemCatalogImporter().importCatalog(from: directory)
+    let groups = CatalogDuplicateIndex(snapshot: snapshot).groups
+
+    #expect(
+      groups.contains { group in
+        group.evidence == [.exactFilename]
+          && Set(group.occurrences.map(\.filename)) == ["Shared.JPG", "shared.jpg"]
+      })
+    #expect(
+      groups.contains { group in
+        group.evidence == [.matchingFilenameStem]
+          && Set(group.occurrences.map(\.filename)) == ["alternate.heic", "alternate.jpg"]
+      })
+  }
+}
+
+@Test func duplicatePairDecisionIsStableAcrossOccurrenceOrder() {
+  let date = Date(timeIntervalSinceReferenceDate: 1_000)
+  let forward = DuplicatePairReviewDecision(
+    firstSourceResourceID: "resource-a",
+    firstSourceObservationID: "observation-a",
+    secondSourceResourceID: "resource-b",
+    secondSourceObservationID: "observation-b",
+    disposition: .confirmedDuplicate,
+    decidedAt: date
+  )
+  let reverse = DuplicatePairReviewDecision(
+    firstSourceResourceID: "resource-b",
+    firstSourceObservationID: "observation-b",
+    secondSourceResourceID: "resource-a",
+    secondSourceObservationID: "observation-a",
+    disposition: .confirmedDuplicate,
+    decidedAt: date
+  )
+
+  #expect(forward == reverse)
+}
+
+@Test func duplicatePairDecisionChangesWithCurrentObservation() {
+  let date = Date(timeIntervalSinceReferenceDate: 1_000)
+  let original = DuplicatePairReviewDecision(
+    firstSourceResourceID: "resource-a",
+    firstSourceObservationID: "observation-a-1",
+    secondSourceResourceID: "resource-b",
+    secondSourceObservationID: "observation-b",
+    disposition: .confirmedDuplicate,
+    decidedAt: date
+  )
+  let changed = DuplicatePairReviewDecision(
+    firstSourceResourceID: "resource-a",
+    firstSourceObservationID: "observation-a-2",
+    secondSourceResourceID: "resource-b",
+    secondSourceObservationID: "observation-b",
+    disposition: .confirmedDuplicate,
+    decidedAt: date
+  )
+
+  #expect(original.id != changed.id)
+}
+
+@Test func stalePairDecisionDoesNotResolveCurrentEvidence() throws {
+  try withTemporaryDirectory { directory in
+    let firstDirectory = directory.appendingPathComponent("first", isDirectory: true)
+    let secondDirectory = directory.appendingPathComponent("second", isDirectory: true)
+    try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+    try Data("first".utf8).write(to: firstDirectory.appendingPathComponent("shared.jpg"))
+    try Data("second".utf8).write(to: secondDirectory.appendingPathComponent("shared.jpg"))
+
+    let duplicateIndex = CatalogDuplicateIndex(
+      snapshot: try FilesystemCatalogImporter().importCatalog(from: directory)
+    )
+    let pair = try #require(duplicateIndex.pairs.first)
+    let staleDecision = DuplicatePairReviewDecision(
+      firstSourceResourceID: pair.first.sourceResourceID,
+      firstSourceObservationID: "stale-observation",
+      secondSourceResourceID: pair.second.sourceResourceID,
+      secondSourceObservationID: pair.second.sourceObservationID,
+      disposition: .confirmedDuplicate,
+      decidedAt: Date()
+    )
+    let resolution = CatalogDuplicateResolutionIndex(
+      duplicateIndex: duplicateIndex,
+      reviewState: LibraryProjectReviewState(duplicatePairDecisions: [staleDecision])
+    )
+
+    #expect(resolution.resolution(for: pair) == .unresolved)
+  }
+}
+
+@Test func exactBytesMakeAnOverlappingFilenamePairAutomatic() throws {
+  try withTemporaryDirectory { directory in
+    let firstDirectory = directory.appendingPathComponent("first", isDirectory: true)
+    let secondDirectory = directory.appendingPathComponent("second", isDirectory: true)
+    try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+    try Data("same".utf8).write(to: firstDirectory.appendingPathComponent("shared.jpg"))
+    try Data("same".utf8).write(to: secondDirectory.appendingPathComponent("shared.jpg"))
+
+    let duplicateIndex = CatalogDuplicateIndex(
+      snapshot: try FilesystemCatalogImporter().importCatalog(from: directory)
+    )
+    let pair = try #require(duplicateIndex.pairs.first)
+
+    #expect(pair.isAutomatic)
+    #expect(pair.evidence.contains(.exactSHA256))
+    #expect(pair.evidence.contains(.exactFilename))
+  }
+}
+
 @Test func filesystemImportIsDeterministicAndRemeasurementIsIdempotent() throws {
   try withTemporaryDirectory { directory in
     try Data("stable-photo".utf8).write(to: directory.appendingPathComponent("stable.heic"))

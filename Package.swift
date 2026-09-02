@@ -37,7 +37,12 @@ let package = Package(
     ),
     .executableTarget(
       name: "PhotoDeFrigifierApp",
-      dependencies: ["PhotoCatalogCore", "ApplePhotosAdapter"]
+      dependencies: ["PhotoCatalogCore", "ApplePhotosAdapter"],
+      linkerSettings: [
+        .linkedFramework("AVFoundation"),
+        .linkedFramework("CoreGraphics"),
+        .linkedFramework("ImageIO"),
+      ]
     ),
     .executableTarget(
       name: "ProviderAccessLab",

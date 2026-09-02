@@ -88,6 +88,12 @@ public struct CatalogIdentityIndex: Equatable, Sendable {
       return item.lastSeenImportRunID == latestImportRunID
     }
 
+    func isCurrent(_ resource: SourceResource) -> Bool {
+      guard let item = sourceItems[resource.sourceItemID] else { return false }
+      return isCurrentlyPresent(item.id)
+        && resource.latestObservationID == item.latestObservationID
+    }
+
     struct VerifiedKey: Hashable {
       let sha256: String
       let byteCount: Int64
@@ -98,7 +104,8 @@ public struct CatalogIdentityIndex: Equatable, Sendable {
       guard
         let sourceResource = resources[link.sourceResourceID],
         let byteResource = byteResources[link.byteResourceID],
-        isCurrentlyPresent(sourceResource.sourceItemID),
+        isCurrent(sourceResource),
+        sourceResource.latestObservationID == link.sourceObservationID,
         sourceItems[sourceResource.sourceItemID]?.latestObservationID
           == link.sourceObservationID,
         byteResource.verificationMethod == .localSHA256,
@@ -131,7 +138,7 @@ public struct CatalogIdentityIndex: Equatable, Sendable {
     }
     var reportedGroups: [ReportedKey: Set<String>] = [:]
     for resource in snapshot.sourceResources {
-      guard isCurrentlyPresent(resource.sourceItemID), let byteCount = resource.byteCount else {
+      guard isCurrent(resource), let byteCount = resource.byteCount else {
         continue
       }
       for digest in resource.reportedDigests {
@@ -197,7 +204,7 @@ public struct CatalogIdentityIndex: Equatable, Sendable {
       guard
         let item = sourceItems[resource.sourceItemID],
         sourceLibraries[item.sourceLibraryID]?.provider == .amazon,
-        isCurrentlyPresent(item.id),
+        isCurrent(resource),
         let byteCount = resource.byteCount
       else { continue }
       for digest in resource.reportedDigests where digest.reportingProvider == .amazon {

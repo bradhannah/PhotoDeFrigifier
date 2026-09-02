@@ -1,7 +1,7 @@
 import Foundation
 
 public enum CatalogSchema {
-  public static let currentVersion = 3
+  public static let currentVersion = 4
 }
 
 public enum CatalogProvider: String, Codable, CaseIterable, Sendable {
@@ -67,7 +67,7 @@ public struct ImportRun: Codable, Equatable, Sendable {
   }
 }
 
-public enum AssetKind: String, Codable, Sendable {
+public enum AssetKind: String, Codable, Hashable, Sendable {
   case audio
   case photo
   case unknown
@@ -168,6 +168,7 @@ public struct ReportedDigest: Codable, Equatable, Sendable {
 public struct SourceResource: Codable, Equatable, Sendable {
   public let id: String
   public let sourceItemID: String
+  public let latestObservationID: String?
   public let role: ResourceRole
   public let originalFilename: String?
   public let mediaType: String?
@@ -179,6 +180,7 @@ public struct SourceResource: Codable, Equatable, Sendable {
   public init(
     id: String,
     sourceItemID: String,
+    latestObservationID: String? = nil,
     role: ResourceRole,
     originalFilename: String? = nil,
     mediaType: String? = nil,
@@ -189,6 +191,7 @@ public struct SourceResource: Codable, Equatable, Sendable {
   ) {
     self.id = id
     self.sourceItemID = sourceItemID
+    self.latestObservationID = latestObservationID
     self.role = role
     self.originalFilename = originalFilename
     self.mediaType = mediaType

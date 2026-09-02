@@ -192,21 +192,9 @@ private struct ProjectWorkspace: View {
     case .people:
       PeopleView(session: session)
     case .destinations:
-      StageView(
-        eyebrow: "04 / ROUTE",
-        title: "Destinations",
-        description:
-          "Choose what belongs in Apple Photos, Google Photos, or two encrypted archive copies.",
-        icon: "arrow.triangle.branch"
-      )
+      DestinationsView(session: session)
     case .review:
-      StageView(
-        eyebrow: "05 / DECIDE",
-        title: "Review",
-        description:
-          "Every migration, privacy rule, and later cleanup action remains reviewable before execution.",
-        icon: "checklist"
-      )
+      ReviewView(session: session)
     case .verify:
       StageView(
         eyebrow: "06 / PROVE",
@@ -265,7 +253,13 @@ private struct OverviewView: View {
                 refresh: { session.refresh(source) },
                 replaceFolder: source.kind == .folder
                   ? { session.chooseReplacementFolder(for: source) }
-                  : nil
+                  : nil,
+                attachDownloads: source.kind == .amazonInventory
+                  ? { session.chooseAmazonDownloads(for: source) }
+                  : nil,
+                attachedFolderCount: session.project?.sources.count {
+                  $0.attachedToSourceID == source.id
+                } ?? 0
               )
             }
           }
@@ -305,7 +299,13 @@ private struct SourcesView: View {
                 refresh: { session.refresh(source) },
                 replaceFolder: source.kind == .folder
                   ? { session.chooseReplacementFolder(for: source) }
-                  : nil
+                  : nil,
+                attachDownloads: source.kind == .amazonInventory
+                  ? { session.chooseAmazonDownloads(for: source) }
+                  : nil,
+                attachedFolderCount: session.project?.sources.count {
+                  $0.attachedToSourceID == source.id
+                } ?? 0
               )
             }
           }
@@ -423,6 +423,8 @@ private struct SourceCard: View {
   let isImporting: Bool
   let refresh: () -> Void
   let replaceFolder: (() -> Void)?
+  let attachDownloads: (() -> Void)?
+  let attachedFolderCount: Int
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -442,6 +444,11 @@ private struct SourceCard: View {
         }
         Spacer()
         HStack(spacing: 10) {
+          if let attachDownloads {
+            Button("Attach Downloads", action: attachDownloads)
+              .buttonStyle(.borderless)
+              .disabled(isImporting)
+          }
           if let replaceFolder {
             Button("Replace Folder", action: replaceFolder)
               .buttonStyle(.borderless)
@@ -465,6 +472,15 @@ private struct SourceCard: View {
             Label("\(unavailable.formatted()) unreadable", systemImage: "exclamationmark.triangle")
           }
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      }
+
+      if source.kind == .amazonInventory {
+        Label(
+          "\(attachedFolderCount.formatted()) download folders attached",
+          systemImage: "folder.badge.plus"
+        )
         .font(.caption)
         .foregroundStyle(.secondary)
       }
@@ -507,7 +523,8 @@ private struct SourceCard: View {
     switch source.kind {
     case .amazonInventory: "Amazon Photos inventory"
     case .applePhotos: "System Photo Library"
-    case .folder: "Folder on Disk"
+    case .folder:
+      source.attachedToSourceID == nil ? "Folder on Disk" : "Amazon download folder"
     }
   }
 }
@@ -662,126 +679,98 @@ private struct ImportingCard: View {
 
 private struct MatchesView: View {
   let session: LibraryProjectSession
-  @State private var showsBulkConfirmation = false
+  @State private var selectedGroupID: String?
 
   var body: some View {
-    let identity = session.identityIndex
-    let decisions = Dictionary(
-      uniqueKeysWithValues: session.reviewState.duplicateDecisions.map {
-        ($0.candidateID, $0.disposition)
-      }
-    )
-    let resourceNames = Dictionary(
-      uniqueKeysWithValues: session.catalog.sourceResources.map {
-        ($0.id, $0.originalFilename ?? "Unnamed resource")
-      })
-    let currentDispositions = identity.amazonMD5ReviewCandidates.compactMap {
-      decisions[$0.id]
-    }
-    ScrollView {
-      LazyVStack(alignment: .leading, spacing: 24) {
-        PageHeader(
-          eyebrow: "02 / RECONCILE",
-          title: "Matches",
-          description:
-            "Measured SHA-256 matches are exact. Amazon MD5 links stay separate until you confirm them."
-        )
-
-        MatchMetrics(
-          exact: identity.automaticMatches.count,
-          candidates: identity.amazonMD5ReviewCandidates.count,
-          confirmed: currentDispositions.count { $0 == .confirmedDuplicate },
-          rejected: currentDispositions.count { $0 == .rejected }
-        )
-
-        if !identity.amazonMD5ReviewCandidates.isEmpty {
-          HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 4) {
-              Text("Amazon MD5 review")
-                .font(.title3.weight(.semibold))
-              Text(
-                "MD5 and byte length agree with locally measured media. This is not a SHA-256 proof."
-              )
-              .font(.caption)
-              .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Confirm All…") { showsBulkConfirmation = true }
-              .buttonStyle(.bordered)
-          }
-
-          ForEach(identity.amazonMD5ReviewCandidates) { candidate in
-            AmazonMD5CandidateCard(
-              candidate: candidate,
-              resourceNames: resourceNames,
-              disposition: decisions[candidate.id],
-              setDisposition: { disposition in
-                session.setDuplicateDisposition(disposition, for: candidate.id)
-              }
-            )
-          }
-        }
-
-        if !identity.automaticMatches.isEmpty {
-          Text("Exact local matches")
-            .font(.title3.weight(.semibold))
-          ForEach(identity.automaticMatches) { match in
-            VStack(alignment: .leading, spacing: 8) {
-              Label("SHA-256 verified", systemImage: "checkmark.seal.fill")
-                .font(.headline)
-                .foregroundStyle(.green)
-              Text(
-                "\(match.sourceResourceIDs.count.formatted()) resources · "
-                  + ByteCountFormatter.string(fromByteCount: match.byteCount, countStyle: .file)
-              )
-              .font(.caption)
-              .foregroundStyle(.secondary)
-              ResourceNames(resourceIDs: match.sourceResourceIDs, names: resourceNames)
-            }
-            .reviewCard()
-          }
-        }
-
-        if identity.automaticMatches.isEmpty && identity.amazonMD5ReviewCandidates.isEmpty {
-          ReviewEmptyState(
-            icon: "link",
-            title: "No cross-source matches yet",
-            message: "Scan local media and provider inventories to build reconciliation evidence."
-          )
-        }
-      }
-      .padding(36)
-    }
-    .background(Color(nsColor: .windowBackgroundColor))
-    .confirmationDialog(
-      "Confirm every Amazon MD5 candidate?",
-      isPresented: $showsBulkConfirmation
-    ) {
-      Button("Confirm All Candidates") {
-        session.setAllAmazonCandidates(.confirmedDuplicate)
-      }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(
-        "This records one explicit review decision for each current MD5-and-size candidate. "
-          + "It does not turn Amazon-reported MD5 into SHA-256 evidence."
+    let groups = session.duplicateIndex.groups
+    VStack(alignment: .leading, spacing: 20) {
+      PageHeader(
+        eyebrow: "02 / RECONCILE",
+        title: "Matches",
+        description:
+          "Compare actual media where bytes are available. Filename evidence always requires review."
       )
+      MatchMetrics(duplicateIndex: session.duplicateIndex, reviewState: session.reviewState)
+
+      if groups.isEmpty {
+        ReviewEmptyState(
+          icon: "link",
+          title: "No duplicate candidates yet",
+          message: "Scan media sources or attach Amazon download folders to build match evidence."
+        )
+      } else {
+        HSplitView {
+          ScrollView {
+            LazyVStack(spacing: 6) {
+              ForEach(groups) { group in
+                DuplicateGroupRow(
+                  group: group,
+                  isSelected: selectedGroupID == group.id
+                ) {
+                  selectedGroupID = group.id
+                }
+              }
+            }
+            .padding(8)
+          }
+          .frame(minWidth: 245, idealWidth: 290, maxWidth: 340)
+          .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12))
+
+          if let group = groups.first(where: { $0.id == selectedGroupID }) ?? groups.first {
+            if session.duplicateIndex.oversizedGroupIDs.contains(group.id) {
+              ReviewEmptyState(
+                icon: "exclamationmark.triangle",
+                title: "Candidate group too broad",
+                message:
+                  "Pair generation is paused because this group exceeds the safe review budget. Narrow the source scope or naming before review."
+              )
+            } else {
+              DuplicateComparisonView(group: group, session: session)
+                .id(group.id)
+            }
+          }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay {
+          RoundedRectangle(cornerRadius: 12)
+            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        }
+      }
+    }
+    .padding(30)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    .background(Color(nsColor: .windowBackgroundColor))
+    .onAppear {
+      if selectedGroupID == nil { selectedGroupID = groups.first?.id }
     }
   }
 }
 
 private struct MatchMetrics: View {
-  let exact: Int
-  let candidates: Int
-  let confirmed: Int
-  let rejected: Int
+  let duplicateIndex: CatalogDuplicateIndex
+  let reviewState: LibraryProjectReviewState
+
+  private var groups: [DuplicateCandidateGroup] { duplicateIndex.groups }
+
+  private var reviewPairIDs: Set<String> {
+    Set(duplicateIndex.pairs.filter { !$0.isAutomatic }.map(\.id))
+  }
 
   var body: some View {
+    let resolutions = CatalogDuplicateResolutionIndex(
+      duplicateIndex: duplicateIndex,
+      reviewState: reviewState
+    )
     HStack(spacing: 12) {
-      metric(exact, "exact groups")
-      metric(candidates, "MD5 candidates")
-      metric(confirmed, "confirmed")
-      metric(rejected, "rejected")
+      metric(groups.count { $0.isAutomatic }, "exact groups")
+      metric(groups.count { $0.evidence.contains(.amazonMD5) }, "MD5 groups")
+      metric(groups.count { $0.evidence.contains(.exactFilename) }, "exact names")
+      metric(
+        reviewPairIDs.count { pairID in
+          resolutions.resolutionByPairID[pairID] == .unresolved
+        },
+        "pairs to review"
+      )
     }
   }
 
@@ -799,88 +788,410 @@ private struct MatchMetrics: View {
   }
 }
 
-private struct AmazonMD5CandidateCard: View {
-  let candidate: AmazonMD5ReviewCandidate
-  let resourceNames: [String: String]
-  let disposition: DuplicateReviewDisposition?
-  let setDisposition: (DuplicateReviewDisposition?) -> Void
+private struct DuplicateGroupRow: View {
+  let group: DuplicateCandidateGroup
+  let isSelected: Bool
+  let select: () -> Void
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    Button(action: select) {
       HStack {
-        Label(statusLabel, systemImage: statusIcon)
-          .font(.headline)
-          .foregroundStyle(statusColor)
-        Spacer()
-        Text(ByteCountFormatter.string(fromByteCount: candidate.byteCount, countStyle: .file))
-          .font(.caption.monospacedDigit())
+        Image(systemName: group.evidence.first?.icon ?? "questionmark")
+          .foregroundStyle(group.evidence.first?.color ?? .secondary)
+          .frame(width: 24)
+        VStack(alignment: .leading, spacing: 3) {
+          Text(group.occurrences.first?.filename ?? "Unnamed group")
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(1)
+            .truncationMode(.middle)
+          Text(
+            "\(group.occurrences.count.formatted()) occurrences · "
+              + (group.evidence.first?.label ?? "Candidate")
+          )
+          .font(.caption)
           .foregroundStyle(.secondary)
-      }
-      HStack(alignment: .top, spacing: 24) {
-        resourceColumn("LOCAL MEASUREMENT", candidate.localSourceResourceIDs)
-        resourceColumn("AMAZON REPORT", candidate.amazonSourceResourceIDs)
-      }
-      HStack {
-        Button("Confirm Duplicate") { setDisposition(.confirmedDuplicate) }
-          .buttonStyle(.borderedProminent)
-        Button("Not the Same") { setDisposition(.rejected) }
-          .buttonStyle(.bordered)
-        if disposition != nil {
-          Button("Clear Decision") { setDisposition(nil) }
-            .buttonStyle(.borderless)
         }
+        Spacer()
+        Image(systemName: "chevron.right")
+          .font(.caption.weight(.bold))
+          .foregroundStyle(.tertiary)
       }
+      .padding(10)
+      .contentShape(Rectangle())
+      .background(
+        isSelected ? Color.orange.opacity(0.12) : Color.clear,
+        in: RoundedRectangle(cornerRadius: 9)
+      )
     }
-    .reviewCard()
+    .buttonStyle(.plain)
+  }
+}
+
+private struct DuplicateComparisonView: View {
+  let group: DuplicateCandidateGroup
+  let session: LibraryProjectSession
+  @State private var anchorOccurrenceID: String?
+  @State private var selectedOccurrenceID: String?
+
+  private var anchor: DuplicateOccurrence {
+    group.occurrences.first { $0.id == anchorOccurrenceID } ?? group.occurrences[0]
   }
 
-  private func resourceColumn(_ title: String, _ resourceIDs: [String]) -> some View {
-    VStack(alignment: .leading, spacing: 5) {
-      Text(title)
+  private var alternatives: [DuplicateOccurrence] {
+    group.occurrences.filter { $0.id != anchor.id }
+  }
+
+  private var selected: DuplicateOccurrence? {
+    alternatives.first { $0.id == selectedOccurrenceID } ?? alternatives.first
+  }
+
+  private var selectedPair: DuplicateCandidatePair? {
+    guard let selected else { return nil }
+    return session.duplicateIndex.pair(
+      between: anchor.sourceResourceID,
+      and: selected.sourceResourceID
+    )
+  }
+
+  private var groupPairs: [DuplicateCandidatePair] {
+    let occurrenceIDs = Set(group.occurrences.map(\.sourceResourceID))
+    return session.duplicateIndex.pairs.filter { pair in
+      occurrenceIDs.contains(pair.first.sourceResourceID)
+        && occurrenceIDs.contains(pair.second.sourceResourceID)
+    }
+  }
+
+  var body: some View {
+    let pairResolutions = CatalogDuplicateResolutionIndex(
+      duplicateIndex: session.duplicateIndex,
+      reviewState: session.reviewState
+    )
+    let nextUnresolvedPair = groupPairs.first {
+      pairResolutions.resolution(for: $0) == .unresolved
+    }
+    ScrollView {
+      VStack(alignment: .leading, spacing: 18) {
+        HStack(spacing: 8) {
+          ForEach(selectedPair?.evidence ?? group.evidence, id: \.self) { evidence in
+            Label(evidence.label, systemImage: evidence.icon)
+              .font(.caption.weight(.semibold))
+              .foregroundStyle(evidence.color)
+              .padding(.horizontal, 9)
+              .padding(.vertical, 5)
+              .background(evidence.color.opacity(0.1), in: Capsule())
+          }
+          Spacer()
+          Text("\(group.occurrences.count.formatted()) occurrences")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+
+        if let nextUnresolvedPair {
+          Button("Next Unresolved Pair") {
+            select(nextUnresolvedPair)
+          }
+          .buttonStyle(.borderedProminent)
+        }
+
+        if let selected, let selectedPair {
+          HStack(alignment: .top, spacing: 16) {
+            ComparisonPane(
+              occurrence: anchor,
+              reference: session.previewIndex?.reference(forSourceResourceID: anchor.id),
+              previewStore: session.previewStore,
+              heading: "LEFT · ANCHOR"
+            )
+            ComparisonPane(
+              occurrence: selected,
+              reference: session.previewIndex?.reference(forSourceResourceID: selected.id),
+              previewStore: session.previewStore,
+              heading: "RIGHT · CANDIDATE"
+            )
+          }
+
+          if selectedPair.isAutomatic {
+            Label("Byte-identical SHA-256 match", systemImage: "checkmark.seal.fill")
+              .font(.headline)
+              .foregroundStyle(.green)
+          } else {
+            PairDecisionControls(
+              pair: selectedPair,
+              first: anchor,
+              second: selected,
+              session: session
+            )
+          }
+
+          if group.occurrences.count > 2 && !group.isAutomatic {
+            Button("Use Right as Left") {
+              anchorOccurrenceID = selected.id
+              selectedOccurrenceID = group.occurrences.first { $0.id != selected.id }?.id
+            }
+            .buttonStyle(.bordered)
+            .help("Move this occurrence to the left so every pair can be compared.")
+          }
+        }
+
+        if alternatives.count > 1 {
+          VStack(alignment: .leading, spacing: 8) {
+            Text("OTHER OCCURRENCES")
+              .font(.system(size: 10, weight: .semibold, design: .monospaced))
+              .tracking(1.2)
+              .foregroundStyle(.secondary)
+            ScrollView(.horizontal) {
+              LazyHStack(spacing: 10) {
+                ForEach(alternatives) { occurrence in
+                  Button {
+                    selectedOccurrenceID = occurrence.id
+                  } label: {
+                    VStack(alignment: .leading, spacing: 5) {
+                      MediaThumbnail(
+                        reference: session.previewIndex?.reference(
+                          forSourceResourceID: occurrence.id
+                        ),
+                        previewStore: session.previewStore,
+                        maximumPixelSize: 260
+                      )
+                      Text(occurrence.filename)
+                        .font(.caption)
+                        .lineLimit(1)
+                      if let pair = session.duplicateIndex.pair(
+                        between: anchor.sourceResourceID,
+                        and: occurrence.sourceResourceID
+                      ) {
+                        Label(
+                          pairResolutions.resolution(for: pair).label,
+                          systemImage: pairResolutions.resolution(for: pair).icon
+                        )
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(pairResolutions.resolution(for: pair).color)
+                      }
+                    }
+                    .padding(6)
+                    .frame(width: 145)
+                    .background(
+                      selected?.id == occurrence.id
+                        ? Color.orange.opacity(0.14) : Color.primary.opacity(0.03),
+                      in: RoundedRectangle(cornerRadius: 10)
+                    )
+                  }
+                  .buttonStyle(.plain)
+                }
+              }
+            }
+          }
+        }
+      }
+      .padding(20)
+    }
+    .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+    .onAppear {
+      anchorOccurrenceID = group.occurrences.first?.id
+      selectedOccurrenceID = alternatives.first?.id
+    }
+  }
+
+  private func select(_ pair: DuplicateCandidatePair) {
+    anchorOccurrenceID = pair.first.id
+    selectedOccurrenceID = pair.second.id
+  }
+}
+
+private struct ComparisonPane: View {
+  let occurrence: DuplicateOccurrence
+  let reference: CatalogPreviewReference?
+  let previewStore: MediaPreviewStore
+  let heading: String
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Text(heading)
         .font(.system(size: 10, weight: .semibold, design: .monospaced))
+        .tracking(1.2)
         .foregroundStyle(.secondary)
-      ResourceNames(resourceIDs: resourceIDs, names: resourceNames)
+      MediaThumbnail(
+        reference: reference,
+        previewStore: previewStore,
+        maximumPixelSize: 900,
+        label: previewLabel
+      )
+      Text(occurrence.filename)
+        .font(.headline)
+        .lineLimit(1)
+        .truncationMode(.middle)
+      HStack(spacing: 10) {
+        Label(occurrence.provider.displayName, systemImage: occurrence.provider.icon)
+        if let dimensions {
+          Text(dimensions)
+        }
+        if let byteCount = occurrence.byteCount {
+          Text(ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file))
+        }
+      }
+      .font(.caption)
+      .foregroundStyle(.secondary)
     }
     .frame(maxWidth: .infinity, alignment: .leading)
   }
 
-  private var statusLabel: String {
-    switch disposition {
-    case .confirmedDuplicate: "Confirmed duplicate"
-    case .rejected: "Rejected"
-    case nil: "Needs review"
-    }
+  private var dimensions: String? {
+    guard let width = occurrence.width, let height = occurrence.height else { return nil }
+    return "\(width) × \(height)"
   }
 
-  private var statusIcon: String {
-    switch disposition {
-    case .confirmedDuplicate: "checkmark.circle.fill"
-    case .rejected: "xmark.circle.fill"
-    case nil: "questionmark.circle"
-    }
-  }
-
-  private var statusColor: Color {
-    switch disposition {
-    case .confirmedDuplicate: .green
-    case .rejected: .red
-    case nil: .orange
+  private var previewLabel: String {
+    switch reference?.provenance {
+    case .amazonReviewCandidate:
+      "AMAZON · MD5 CANDIDATE PROXY"
+    case .appleAssetRendition:
+      "APPLE · ASSET RENDITION"
+    case .direct:
+      occurrence.provider.displayName.uppercased()
+    case nil:
+      occurrence.provider == .amazon ? "AMAZON · NOT DOWNLOADED" : occurrence.provider.displayName
     }
   }
 }
 
-private struct ResourceNames: View {
-  let resourceIDs: [String]
-  let names: [String: String]
+private struct PairDecisionControls: View {
+  let pair: DuplicateCandidatePair
+  let first: DuplicateOccurrence
+  let second: DuplicateOccurrence
+  let session: LibraryProjectSession
+
+  private var disposition: DuplicateReviewDisposition? {
+    if let decision = session.reviewState.duplicatePairDecisions.first(where: { $0.id == pair.id })
+    {
+      return decision.disposition
+    }
+    return nil
+  }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 3) {
-      ForEach(resourceIDs, id: \.self) { resourceID in
-        Text(names[resourceID] ?? "Unnamed resource")
-          .font(.subheadline)
-          .lineLimit(1)
-          .truncationMode(.middle)
+    HStack(spacing: 10) {
+      Button("Same Media") { set(.confirmedDuplicate) }
+        .buttonStyle(.borderedProminent)
+      Button("Different") { set(.rejected) }
+        .buttonStyle(.bordered)
+      if let disposition {
+        Label(disposition.label, systemImage: disposition.icon)
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(disposition.color)
+        Button("Clear") { set(nil) }
+          .buttonStyle(.borderless)
+      } else {
+        Text("Review required before this relationship can affect People or routing.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
+    }
+  }
+
+  private func set(_ disposition: DuplicateReviewDisposition?) {
+    session.setDuplicatePairDisposition(
+      disposition,
+      first: first,
+      second: second
+    )
+  }
+}
+
+extension DuplicateEvidenceKind {
+  fileprivate var label: String {
+    switch self {
+    case .exactSHA256: "Exact SHA-256"
+    case .amazonMD5: "Amazon MD5 + type"
+    case .exactFilename: "Exact filename"
+    case .matchingFilenameStem: "Matching filename stem"
+    }
+  }
+
+  fileprivate var icon: String {
+    switch self {
+    case .exactSHA256: "checkmark.seal.fill"
+    case .amazonMD5: "number"
+    case .exactFilename: "doc.on.doc"
+    case .matchingFilenameStem: "text.magnifyingglass"
+    }
+  }
+
+  fileprivate var color: Color {
+    switch self {
+    case .exactSHA256: .green
+    case .amazonMD5: .blue
+    case .exactFilename: .orange
+    case .matchingFilenameStem: .purple
+    }
+  }
+}
+
+extension DuplicateReviewDisposition {
+  fileprivate var label: String {
+    switch self {
+    case .confirmedDuplicate: "Confirmed same"
+    case .rejected: "Marked different"
+    }
+  }
+
+  fileprivate var icon: String {
+    switch self {
+    case .confirmedDuplicate: "checkmark.circle.fill"
+    case .rejected: "xmark.circle.fill"
+    }
+  }
+
+  fileprivate var color: Color {
+    switch self {
+    case .confirmedDuplicate: .green
+    case .rejected: .red
+    }
+  }
+}
+
+extension DuplicatePairResolution {
+  fileprivate var label: String {
+    switch self {
+    case .automatic: "Exact"
+    case .confirmed: "Same Media"
+    case .rejected: "Different"
+    case .unresolved: "Needs Review"
+    }
+  }
+
+  fileprivate var icon: String {
+    switch self {
+    case .automatic: "checkmark.seal.fill"
+    case .confirmed: "checkmark.circle.fill"
+    case .rejected: "xmark.circle.fill"
+    case .unresolved: "circle.dashed"
+    }
+  }
+
+  fileprivate var color: Color {
+    switch self {
+    case .automatic, .confirmed: .green
+    case .rejected: .red
+    case .unresolved: .orange
+    }
+  }
+}
+
+extension CatalogProvider {
+  fileprivate var displayName: String {
+    switch self {
+    case .amazon: "Amazon"
+    case .applePhotos: "Apple Photos"
+    case .filesystem: "Folder"
+    case .googlePhotos: "Google Photos"
+    }
+  }
+
+  fileprivate var icon: String {
+    switch self {
+    case .amazon: "shippingbox"
+    case .applePhotos: "photo.on.rectangle.angled"
+    case .filesystem: "folder"
+    case .googlePhotos: "g.circle"
     }
   }
 }
@@ -892,7 +1203,8 @@ private struct PeopleView: View {
     CatalogPeopleIndex(
       snapshot: session.catalog,
       reviewState: session.reviewState,
-      identityIndex: session.identityIndex
+      identityIndex: session.identityIndex,
+      duplicateIndex: session.duplicateIndex
     )
   }
 
@@ -920,8 +1232,14 @@ private struct PeopleView: View {
           eyebrow: "03 / PEOPLE",
           title: "People",
           description:
-            "Provider names remain evidence. Create your own identities, then assign privacy routing."
+            "Provider names remain evidence. Choose explicit Apple and Google routing for each person."
         )
+        Text(
+          "For photos containing several people, the most restrictive destination choice wins. "
+            + "Archive protection remains required for every retained original."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
 
         if !session.reviewState.canonicalPeople.isEmpty {
           Text("Your people")
@@ -931,7 +1249,7 @@ private struct PeopleView: View {
               $0.canonicalPersonID == person.id
             }
             VStack(alignment: .leading, spacing: 12) {
-              HStack {
+              HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
                   Text(person.preferredName)
                     .font(.headline)
@@ -943,19 +1261,41 @@ private struct PeopleView: View {
                   .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Picker(
-                  "Privacy",
-                  selection: Binding(
-                    get: { person.privacyCategory },
-                    set: { session.setPrivacyCategory($0, for: person.id) }
-                  )
-                ) {
-                  ForEach(PersonPrivacyCategory.allCases, id: \.self) { category in
-                    Text(category.label).tag(category)
+                VStack(alignment: .leading, spacing: 8) {
+                  LabeledContent("Apple Photos") {
+                    Picker(
+                      "Apple Photos",
+                      selection: Binding<ApplePersonRoute?>(
+                        get: { person.routing.apple },
+                        set: { session.setAppleRoute($0, for: person.id) }
+                      )
+                    ) {
+                      Text("Choose").tag(nil as ApplePersonRoute?)
+                      ForEach(ApplePersonRoute.allCases, id: \.self) { route in
+                        Text(route.label).tag(route as ApplePersonRoute?)
+                      }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                  }
+                  LabeledContent("Google Photos") {
+                    Picker(
+                      "Google Photos",
+                      selection: Binding<GooglePersonRoute?>(
+                        get: { person.routing.google },
+                        set: { session.setGoogleRoute($0, for: person.id) }
+                      )
+                    ) {
+                      Text("Choose").tag(nil as GooglePersonRoute?)
+                      ForEach(GooglePersonRoute.allCases, id: \.self) { route in
+                        Text(route.label).tag(route as GooglePersonRoute?)
+                      }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
                   }
                 }
-                .labelsHidden()
-                .frame(width: 190)
+                .frame(width: 270)
               }
             }
             .reviewCard()
@@ -1018,6 +1358,371 @@ private struct PeopleView: View {
   }
 }
 
+private struct DestinationsView: View {
+  let session: LibraryProjectSession
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        PageHeader(
+          eyebrow: "04 / ROUTE",
+          title: "Destinations",
+          description:
+            "Configure where reviewed media may go. Choosing locations does not copy or upload anything."
+        )
+
+        VStack(alignment: .leading, spacing: 12) {
+          HStack {
+            destinationIcon("photo.on.rectangle.angled", color: .orange)
+            VStack(alignment: .leading, spacing: 3) {
+              Text("Apple Photos")
+                .font(.headline)
+              Text(appleSourceStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Label(
+              hasAppleSource ? "Connected" : "Not connected",
+              systemImage: hasAppleSource ? "checkmark.circle.fill" : "exclamationmark.circle"
+            )
+            .foregroundStyle(hasAppleSource ? Color.green : Color.orange)
+          }
+          Text(
+            "Visible and Hidden routing use the current system library. Hidden items still sync through iCloud Photos."
+          )
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        }
+        .reviewCard()
+
+        DestinationDirectoryCard(
+          slot: .googleReadyExport,
+          destination: session.project?.destinations.googleReadyExport,
+          session: session
+        )
+
+        HStack(alignment: .top, spacing: 14) {
+          DestinationDirectoryCard(
+            slot: .archiveOne,
+            destination: session.project?.destinations.archiveOne,
+            session: session
+          )
+          DestinationDirectoryCard(
+            slot: .archiveTwo,
+            destination: session.project?.destinations.archiveTwo,
+            session: session
+          )
+        }
+
+        archiveSafetyCard
+      }
+      .padding(36)
+      .frame(maxWidth: 980, alignment: .leading)
+    }
+    .background(Color(nsColor: .windowBackgroundColor))
+  }
+
+  private var hasAppleSource: Bool {
+    session.project?.sources.contains { $0.kind == .applePhotos } == true
+  }
+
+  private var appleSourceStatus: String {
+    guard let source = session.project?.sources.first(where: { $0.kind == .applePhotos }) else {
+      return "Add the current system Photos library from Sources."
+    }
+    return
+      "\(source.itemCount.formatted()) items inventoried; PhotoKit remains the only access path."
+  }
+
+  private var archiveSafetyCard: some View {
+    let firstVolume = session.project?.destinations.archiveOne?.volumeUUID
+    let secondVolume = session.project?.destinations.archiveTwo?.volumeUUID
+    let independent = firstVolume != nil && secondVolume != nil && firstVolume != secondVolume
+    return VStack(alignment: .leading, spacing: 8) {
+      Label(
+        independent
+          ? "Archive locations are on distinct volumes" : "Archive independence not established",
+        systemImage: independent ? "checkmark.shield.fill" : "exclamationmark.shield"
+      )
+      .font(.headline)
+      .foregroundStyle(independent ? Color.green : Color.orange)
+      Text(
+        "Every retained original is planned for both archives. Actual protection requires completed writes, repository checks, and representative restores; bookmarks alone never count as verification."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .reviewCard()
+  }
+
+  private func destinationIcon(_ name: String, color: Color) -> some View {
+    Image(systemName: name)
+      .font(.system(size: 18, weight: .semibold))
+      .foregroundStyle(color)
+      .frame(width: 34, height: 34)
+      .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+  }
+}
+
+private struct DestinationDirectoryCard: View {
+  let slot: LibraryProjectDestinationSlot
+  let destination: ProjectDirectoryDestination?
+  let session: LibraryProjectSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack {
+        Image(systemName: slot.icon)
+          .font(.system(size: 18, weight: .semibold))
+          .foregroundStyle(slot.color)
+          .frame(width: 34, height: 34)
+          .background(slot.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        VStack(alignment: .leading, spacing: 3) {
+          Text(slot.label)
+            .font(.headline)
+          Text(slot.detail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+      }
+      Divider()
+      if let destination {
+        Label(destination.displayName, systemImage: "folder.fill")
+          .lineLimit(1)
+          .truncationMode(.middle)
+        Text(destination.volumeUUID == nil ? "Volume identity unavailable" : "Volume identified")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      } else {
+        Text("Not configured")
+          .foregroundStyle(.secondary)
+      }
+      HStack {
+        Button(destination == nil ? "Choose Directory" : "Replace") {
+          session.chooseDestination(slot)
+        }
+        .buttonStyle(.borderedProminent)
+        if destination != nil {
+          Button("Clear") { session.clearDestination(slot) }
+            .buttonStyle(.borderless)
+        }
+      }
+    }
+    .reviewCard()
+  }
+}
+
+private struct ReviewView: View {
+  let session: LibraryProjectSession
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        PageHeader(
+          eyebrow: "05 / DECIDE",
+          title: "Review",
+          description:
+            "Inspect the derived routing plan and every blocker. This version performs no migration or cleanup."
+        )
+
+        if let plan = session.reviewPlan {
+          readiness(plan)
+          if !plan.blockers.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+              Text("Blockers")
+                .font(.title3.weight(.semibold))
+              ForEach(Array(plan.blockers.enumerated()), id: \.offset) { _, blocker in
+                HStack(alignment: .top, spacing: 10) {
+                  Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+                  VStack(alignment: .leading, spacing: 2) {
+                    Text(blocker.title)
+                      .font(.headline)
+                    Text(blocker.detail)
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                  }
+                }
+                .reviewCard()
+              }
+            }
+          }
+
+          HStack(alignment: .top, spacing: 14) {
+            routeSummary(
+              title: "Apple Photos",
+              icon: "photo.on.rectangle.angled",
+              rows: [
+                ("Visible", plan.apple.visibleAssetIDs.count),
+                ("Hidden", plan.apple.hiddenAssetIDs.count),
+                ("Excluded", plan.apple.excludedAssetIDs.count),
+                ("Unresolved", plan.apple.unresolvedAssetIDs.count),
+              ]
+            )
+            routeSummary(
+              title: "Google-ready export",
+              icon: "g.circle",
+              rows: [
+                ("Included", plan.google.includedAssetIDs.count),
+                ("Excluded", plan.google.excludedAssetIDs.count),
+                ("Unresolved", plan.google.unresolvedAssetIDs.count),
+              ]
+            )
+            routeSummary(
+              title: "Encrypted archives",
+              icon: "externaldrive.badge.timemachine",
+              rows: [
+                ("Planned originals", plan.archives.assetIDs.count),
+                ("Locations", plan.archives.configuredSlots.count),
+                ("Verified copies", 0),
+              ]
+            )
+          }
+
+          VStack(alignment: .leading, spacing: 8) {
+            Label("Cleanup unavailable", systemImage: "hand.raised.fill")
+              .font(.headline)
+              .foregroundStyle(.orange)
+            Text(
+              "No delete, move, upload, PhotoKit write, or archive command exists in this plan. Cleanup remains blocked until two independent archive receipts are implemented and verified."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          }
+          .reviewCard()
+        }
+      }
+      .padding(36)
+      .frame(maxWidth: 1_050, alignment: .leading)
+    }
+    .background(Color(nsColor: .windowBackgroundColor))
+  }
+
+  private func readiness(_ plan: LibraryProjectPlan) -> some View {
+    HStack(spacing: 14) {
+      Image(
+        systemName: plan.isConfigurationComplete ? "checkmark.seal.fill" : "checklist.unchecked"
+      )
+      .font(.system(size: 30, weight: .medium))
+      .foregroundStyle(plan.isConfigurationComplete ? Color.green : Color.orange)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(plan.isConfigurationComplete ? "Configuration complete" : "Review is open")
+          .font(.title3.weight(.semibold))
+        Text(
+          plan.isConfigurationComplete
+            ? "The non-destructive routing configuration has no unresolved blockers."
+            : "\(plan.blockers.count.formatted()) blockers remain; every section stays available while you resolve them."
+        )
+        .foregroundStyle(.secondary)
+      }
+    }
+    .padding(20)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      (plan.isConfigurationComplete ? Color.green : Color.orange).opacity(0.08),
+      in: RoundedRectangle(cornerRadius: 14)
+    )
+  }
+
+  private func routeSummary(
+    title: String,
+    icon: String,
+    rows: [(String, Int)]
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Label(title, systemImage: icon)
+        .font(.headline)
+      Divider()
+      ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+        HStack {
+          Text(row.0)
+            .foregroundStyle(.secondary)
+          Spacer()
+          Text(row.1.formatted())
+            .font(.body.monospacedDigit().weight(.semibold))
+        }
+      }
+    }
+    .reviewCard()
+  }
+}
+
+extension LibraryProjectDestinationSlot {
+  fileprivate var label: String {
+    switch self {
+    case .googleReadyExport: "Google-ready export"
+    case .archiveOne: "Archive location 1"
+    case .archiveTwo: "Archive location 2"
+    }
+  }
+
+  fileprivate var detail: String {
+    switch self {
+    case .googleReadyExport: "Local reviewed output for manual upload"
+    case .archiveOne: "First encrypted repository or staging root"
+    case .archiveTwo: "Second independent encrypted location"
+    }
+  }
+
+  fileprivate var icon: String {
+    switch self {
+    case .googleReadyExport: "square.and.arrow.up"
+    case .archiveOne, .archiveTwo: "externaldrive"
+    }
+  }
+
+  fileprivate var color: Color {
+    switch self {
+    case .googleReadyExport: .blue
+    case .archiveOne, .archiveTwo: .orange
+    }
+  }
+}
+
+extension LibraryProjectPlanBlocker {
+  fileprivate var title: String {
+    switch self {
+    case .noCurrentAssets: "No current media"
+    case .unresolvedDuplicatePairs: "Duplicate review incomplete"
+    case .contradictoryDuplicatePairs: "Duplicate decisions conflict"
+    case .duplicateGroupsTooLarge: "Duplicate group is too broad"
+    case .unassignedSourcePeople: "Source people need identities"
+    case .incompletePersonRouting: "Person routing incomplete"
+    case .applePhotosNotConnected: "Apple Photos not connected"
+    case .destinationNotConfigured(let slot): "\(slot.label) not configured"
+    case .archiveIndependenceUnverified: "Archive independence unverified"
+    case .amazonItemsMissingDownloads: "Amazon media missing locally"
+    }
+  }
+
+  fileprivate var detail: String {
+    switch self {
+    case .noCurrentAssets:
+      "Add or rescan a media source before generating a route."
+    case .unresolvedDuplicatePairs(let ids):
+      "\(ids.count.formatted()) candidate pairs still need Same Media or Different decisions."
+    case .contradictoryDuplicatePairs(let ids):
+      "\(ids.count.formatted()) Different decisions conflict with a chain of Same Media decisions."
+    case .duplicateGroupsTooLarge(let ids):
+      "\(ids.count.formatted()) candidate groups exceed the safe pair-review budget. Narrow the source scope or naming before review."
+    case .unassignedSourcePeople(let ids):
+      "\(ids.count.formatted()) current provider identities have not been made into your people."
+    case .incompletePersonRouting(let ids):
+      "\(ids.count.formatted()) people affecting current photos still need Apple or Google choices."
+    case .applePhotosNotConnected:
+      "Visible or Hidden routes require the current system Photos library in Sources."
+    case .destinationNotConfigured(let slot):
+      "Choose the \(slot.label.lowercased()) directory in Destinations."
+    case .archiveIndependenceUnverified:
+      "Both archive locations need identifiable, distinct volumes. Configuration is not protection."
+    case .amazonItemsMissingDownloads(let ids):
+      "\(ids.count.formatted()) Amazon inventory items have no MD5-matched file in attached download folders."
+    }
+  }
+}
+
 private struct ReviewEmptyState: View {
   let icon: String
   let title: String
@@ -1049,12 +1754,21 @@ extension View {
   }
 }
 
-extension PersonPrivacyCategory {
+extension ApplePersonRoute {
   fileprivate var label: String {
     switch self {
-    case .standard: "Standard"
-    case .privateCloudAcceptable: "Private Cloud OK"
-    case .neverCloud: "Never Cloud"
+    case .visible: "Visible"
+    case .hidden: "Hidden"
+    case .exclude: "Exclude"
+    }
+  }
+}
+
+extension GooglePersonRoute {
+  fileprivate var label: String {
+    switch self {
+    case .include: "Include"
+    case .exclude: "Exclude"
     }
   }
 }

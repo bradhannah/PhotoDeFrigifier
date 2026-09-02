@@ -182,6 +182,7 @@ public enum ApplePhotosCatalogBuilder {
           SourceResource(
             id: resourceID,
             sourceItemID: sourceItemID,
+            latestObservationID: observationID,
             role: resource.role,
             originalFilename: resource.filename,
             mediaType: resource.mediaType,

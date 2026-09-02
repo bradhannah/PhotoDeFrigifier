@@ -116,6 +116,105 @@ import Testing
   }
 }
 
+@Test func duplicateIndexDoesNotCompareResourcesFromTheSameSourceItem() throws {
+  let observations = [
+    ApplePhotoObservation(
+      localIdentifier: "asset-1",
+      kind: .photo,
+      resources: [
+        ProviderResourceObservation(
+          externalID: "photo|0",
+          role: .primary,
+          filename: "shared.jpg",
+          mediaType: "image/jpeg",
+          localReadState: .requiresNetwork
+        ),
+        ProviderResourceObservation(
+          externalID: "photo|1",
+          role: .primary,
+          filename: "shared.jpg",
+          mediaType: "image/jpeg",
+          localReadState: .requiresNetwork
+        ),
+      ],
+      metadata: [:]
+    ),
+    ApplePhotoObservation(
+      localIdentifier: "asset-2",
+      kind: .photo,
+      resources: [
+        ProviderResourceObservation(
+          externalID: "photo|0",
+          role: .primary,
+          filename: "shared.jpg",
+          mediaType: "image/jpeg",
+          localReadState: .requiresNetwork
+        )
+      ],
+      metadata: [:]
+    ),
+  ]
+  let snapshot = try ApplePhotosCatalogBuilder.build(
+    observations: observations,
+    sourceIdentity: ApplePhotosSourceIdentity(
+      sourceLibraryID: "library:apple",
+      externalAccountID: "system-library:test"
+    )
+  )
+  let pairs = CatalogDuplicateIndex(snapshot: snapshot).pairs
+
+  #expect(pairs.count == 2)
+  #expect(pairs.allSatisfy { $0.first.sourceItemID != $0.second.sourceItemID })
+}
+
+@Test func removedAppleResourceRemainsHistoryButIsNotCurrentMatchEvidence() throws {
+  func observation(_ localIdentifier: String, filenames: [String]) -> ApplePhotoObservation {
+    ApplePhotoObservation(
+      localIdentifier: localIdentifier,
+      kind: .photo,
+      resources: filenames.enumerated().map { index, filename in
+        ProviderResourceObservation(
+          externalID: "photo|\(index)",
+          role: .primary,
+          filename: filename,
+          mediaType: "image/jpeg",
+          localReadState: .requiresNetwork
+        )
+      },
+      metadata: [:]
+    )
+  }
+  let identity = ApplePhotosSourceIdentity(
+    sourceLibraryID: "library:apple",
+    externalAccountID: "system-library:test"
+  )
+  let first = try ApplePhotosCatalogBuilder.build(
+    observations: [
+      observation("asset-1", filenames: ["kept.jpg", "shared.jpg"]),
+      observation("asset-2", filenames: ["shared.jpg"]),
+    ],
+    sourceIdentity: identity,
+    importedAt: Date(timeIntervalSinceReferenceDate: 1_000)
+  )
+  let second = try ApplePhotosCatalogBuilder.build(
+    observations: [
+      observation("asset-1", filenames: ["kept.jpg"]),
+      observation("asset-2", filenames: ["shared.jpg"]),
+    ],
+    sourceIdentity: identity,
+    importedAt: Date(timeIntervalSinceReferenceDate: 2_000)
+  )
+  let merged = try CatalogMerge.merging(second, into: first)
+
+  #expect(merged.sourceResources.count == 3)
+  #expect(CatalogDuplicateIndex(snapshot: merged).pairs.isEmpty)
+  let currentItems = Dictionary(uniqueKeysWithValues: merged.sourceItems.map { ($0.id, $0) })
+  #expect(
+    merged.sourceResources.count { resource in
+      resource.latestObservationID == currentItems[resource.sourceItemID]?.latestObservationID
+    } == 2)
+}
+
 @Test func appleIdentityAnchorsRejectAChangedSystemLibrary() throws {
   #expect(
     try ApplePhotosCatalogBuilder.updatedIdentityAnchors(

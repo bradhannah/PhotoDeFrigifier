@@ -33,7 +33,7 @@ public enum CatalogStoreError: Error, Equatable, LocalizedError {
 }
 
 public enum CatalogJSONLStore {
-  private static let supportedLegacySchemaVersion = 2
+  private static let supportedLegacySchemaVersions: Set<Int> = [2, 3]
   private static let processWriteLock = NSLock()
 
   public static func write(_ snapshot: CatalogSnapshot, to destination: URL) throws {
@@ -137,7 +137,7 @@ public enum CatalogJSONLStore {
           guard manifest.containsPrivateMetadata else { throw CatalogStoreError.invalidManifest }
           guard
             manifest.schemaVersion == CatalogSchema.currentVersion
-              || manifest.schemaVersion == supportedLegacySchemaVersion
+              || supportedLegacySchemaVersions.contains(manifest.schemaVersion)
           else {
             throw CatalogStoreError.unsupportedSchema(manifest.schemaVersion)
           }
@@ -357,10 +357,15 @@ public enum CatalogJSONLStore {
     }
     guard
       snapshot.sourceResources.allSatisfy({ resource in
-        itemsByID[resource.sourceItemID] != nil
-          && resource.byteCount.map { $0 >= 0 } ?? true
-          && resource.width.map { $0 >= 0 } ?? true
-          && resource.height.map { $0 >= 0 } ?? true
+        guard let item = itemsByID[resource.sourceItemID] else { return false }
+        let observationIsValid =
+          resource.latestObservationID.map { observationID in
+            observationsByID[observationID]?.sourceItemID == item.id
+          } ?? true
+        return observationIsValid
+          && (resource.byteCount.map { $0 >= 0 } ?? true)
+          && (resource.width.map { $0 >= 0 } ?? true)
+          && (resource.height.map { $0 >= 0 } ?? true)
       })
     else {
       throw CatalogStoreError.invalidReference("source resource item")
@@ -469,7 +474,7 @@ public enum CatalogJSONLStore {
   }
 
   private static func migrateToCurrentSchema(_ snapshot: CatalogSnapshot) -> CatalogSnapshot {
-    guard snapshot.schemaVersion == supportedLegacySchemaVersion else { return snapshot }
+    guard supportedLegacySchemaVersions.contains(snapshot.schemaVersion) else { return snapshot }
     let latestRunsByLibraryID = Dictionary(
       grouping: snapshot.importRuns,
       by: \.sourceLibraryID
@@ -503,13 +508,39 @@ public enum CatalogJSONLStore {
         kind: item.kind
       )
     }
+    let itemsByID = Dictionary(
+      items.map { ($0.id, $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
+    let linksByResourceID = Dictionary(
+      snapshot.assetResourceLinks.map { ($0.sourceResourceID, $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
+    let resources = snapshot.sourceResources.map { resource in
+      SourceResource(
+        id: resource.id,
+        sourceItemID: resource.sourceItemID,
+        latestObservationID: resource.latestObservationID
+          ?? linksByResourceID[resource.id].flatMap { link in
+            link.sourceObservationID == itemsByID[resource.sourceItemID]?.latestObservationID
+              ? link.sourceObservationID : nil
+          },
+        role: resource.role,
+        originalFilename: resource.originalFilename,
+        mediaType: resource.mediaType,
+        byteCount: resource.byteCount,
+        width: resource.width,
+        height: resource.height,
+        reportedDigests: resource.reportedDigests
+      )
+    }
     return CatalogSnapshot(
       schemaVersion: CatalogSchema.currentVersion,
       sourceLibraries: libraries,
       importRuns: snapshot.importRuns,
       assets: snapshot.assets,
       sourceItems: items,
-      sourceResources: snapshot.sourceResources,
+      sourceResources: resources,
       byteResources: snapshot.byteResources,
       assetResourceLinks: snapshot.assetResourceLinks,
       metadataClaims: snapshot.metadataClaims,

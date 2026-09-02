@@ -36,6 +36,7 @@ import Testing
   snapshot.sourceResources[1] = SourceResource(
     id: "resource-2",
     sourceItemID: "item-2",
+    latestObservationID: "observation-2",
     role: .edited,
     byteCount: 12
   )
@@ -207,6 +208,45 @@ import Testing
   try CatalogJSONLStore.validate(migrated)
 }
 
+@Test func catalogMigratesSchemaThreeResourceObservations() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+    UUID().uuidString,
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let source = directory.appendingPathComponent("schema-3-catalog.jsonl")
+  try CatalogJSONLStore.write(fixtureCatalog(), to: source)
+  let currentContents = try String(contentsOf: source, encoding: .utf8)
+  let legacyLines = try currentContents.split(separator: "\n").map { line -> Data in
+    let data = try #require(String(line).data(using: .utf8))
+    var object = try #require(
+      JSONSerialization.jsonObject(with: data) as? [String: Any]
+    )
+    if object["recordType"] as? String == "catalogManifest" {
+      object["schemaVersion"] = 3
+    } else if object["recordType"] as? String == "sourceResource" {
+      var value = try #require(object["value"] as? [String: Any])
+      value.removeValue(forKey: "latestObservationID")
+      object["value"] = value
+    }
+    return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+  }
+  try legacyLines.reduce(into: Data()) { contents, line in
+    contents.append(line)
+    contents.append(0x0A)
+  }.write(to: source)
+
+  let migrated = try CatalogJSONLStore.read(from: source)
+
+  #expect(migrated.schemaVersion == CatalogSchema.currentVersion)
+  let items = Dictionary(uniqueKeysWithValues: migrated.sourceItems.map { ($0.id, $0) })
+  #expect(
+    migrated.sourceResources.allSatisfy { resource in
+      resource.latestObservationID == items[resource.sourceItemID]?.latestObservationID
+    })
+}
+
 @Test func corruptSchemaTwoDuplicateObservationIsRejectedWithoutCrashing() throws {
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
     UUID().uuidString,
@@ -227,6 +267,30 @@ import Testing
   try Data(corruptContents.utf8).write(to: source)
 
   #expect(throws: CatalogStoreError.duplicateEntity("source observation")) {
+    try CatalogJSONLStore.read(from: source)
+  }
+}
+
+@Test func corruptLegacyDuplicateSourceItemIsRejectedWithoutCrashing() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+    UUID().uuidString,
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let source = directory.appendingPathComponent("corrupt-schema-3-catalog.jsonl")
+  try CatalogJSONLStore.write(fixtureCatalog(), to: source)
+  let currentContents = try String(contentsOf: source, encoding: .utf8)
+  let corruptContents =
+    currentContents
+    .replacingOccurrences(
+      of: "\"schemaVersion\":\(CatalogSchema.currentVersion)",
+      with: "\"schemaVersion\":3"
+    )
+    .replacingOccurrences(of: "\"id\":\"item-2\"", with: "\"id\":\"item-1\"")
+  try Data(corruptContents.utf8).write(to: source)
+
+  #expect(throws: CatalogStoreError.duplicateEntity("source item")) {
     try CatalogJSONLStore.read(from: source)
   }
 }
@@ -453,8 +517,20 @@ private func fixtureCatalog() -> CatalogSnapshot {
       ),
     ],
     sourceResources: [
-      SourceResource(id: "resource-1", sourceItemID: "item-1", role: .original, byteCount: 12),
-      SourceResource(id: "resource-2", sourceItemID: "item-2", role: .primary, byteCount: 12),
+      SourceResource(
+        id: "resource-1",
+        sourceItemID: "item-1",
+        latestObservationID: "observation-1",
+        role: .original,
+        byteCount: 12
+      ),
+      SourceResource(
+        id: "resource-2",
+        sourceItemID: "item-2",
+        latestObservationID: "observation-2",
+        role: .primary,
+        byteCount: 12
+      ),
     ],
     byteResources: [byteResource],
     assetResourceLinks: [

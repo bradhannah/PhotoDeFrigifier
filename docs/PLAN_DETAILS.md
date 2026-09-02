@@ -43,7 +43,7 @@ items before duplicates across providers are counted.
 | Deletion | No source/provider deletion in v1 | Migration must be reversible and independently audited | After verified backups and a separate deletion design |
 | Apple | Primary library | Best local integration and user preference | User decision |
 | Google | Secondary backup, initially browser-assisted | Full existing-library APIs are no longer available | Register a Google OAuth client for automated uploads |
-| Sensitive media | Two privacy levels | Apple Hidden and never-cloud media have different threat models | User decision |
+| Sensitive media | Explicit Apple and Google routes, plus mandatory archives | Apple Hidden, cloud exclusion, and archive recovery are independent choices | User decision |
 | Amazon | Isolated read-only cookie probe, then export fallback | No supported consumer Photos API exists | Amazon publishes a supported API |
 | Auth | Registration-free hybrid initially | Avoid provider developer-client setup | Automated Google uploads become worth registration |
 
@@ -350,10 +350,16 @@ are resolutions over assertions, not destructive replacements.
 ### Implemented Catalog Foundation
 
 - `PhotoCatalogCore` is independent of PhotoKit and the experimental cookie lab.
-- The current canonical JSONL schema is version 3. Schema-2 catalogs are migrated
-  on read by reconstructing explicit current-run pointers; locally measured MD5
-  remains absent until a source is measured again. The Amazon private-JSONL
-  adapter is version 3; format or interpretation changes require version bumps.
+- The current canonical JSONL schema is version 4. Schema-2 catalogs are migrated
+  on read by reconstructing explicit current-run pointers; schema-2 and schema-3
+  resources are considered current only when existing byte evidence binds them to
+  the owning item's latest observation. Other legacy resources remain
+  historical/unknown until rescan rather than receiving fabricated provenance.
+  New scans bind each resource to the exact observation that contained it, so
+  resources removed from a later compound item remain historical rather than
+  current match evidence. Locally measured MD5 remains absent until a source is
+  measured again. The Amazon private-JSONL adapter is version 3; format or
+  interpretation changes require version bumps.
 - Stable source identity is scoped by source library and provider external ID.
 - Import runs retain adapter/version, source schema, capture time, record count,
   source library, and SHA-256 of the source inventory. All of those fields scope
@@ -379,12 +385,20 @@ are resolutions over assertions, not destructive replacements.
   mode-`0600` manifest records source identity, import status, and security-scoped
   bookmarks; its canonical catalog remains a separate private JSONL file inside
   the package.
+- Library Project schema 2 allows one Amazon inventory to own several attached
+  download-folder sources and persists a Google-ready export destination plus two
+  independently identified archive destinations. Schema-1 manifests migrate in
+  memory and are rewritten only after a later project update.
 - Project imports are serialized with a package lock and a private pending-import
   journal. Opening a project recovers an interrupted manifest update from the
   already-committed catalog before returning one locked manifest/catalog view.
 - Explicit match decisions, canonical people, source-person assignments, and
-  privacy categories are stored separately in an atomic mode-`0600` `review.json`.
-  Provider evidence remains unchanged when the user changes review state.
+  destination-specific person routes are stored separately in an atomic
+  mode-`0600` `review.json`. Review schema 2 records Apple `Visible`, `Hidden`, or
+  `Exclude` and Google `Include` or `Exclude`; schema-1 privacy categories migrate
+  conservatively. Legacy candidate-level duplicate decisions remain historical
+  but require current pair review because they were not bound to observations.
+  Provider evidence remains unchanged when review state changes.
 - The filesystem adapter version 2 recursively inventories ordinary photo/video folders,
   skips hidden entries, symlinks, and package descendants, streams each regular
   file through SHA-256 and MD5, measures byte length, and reads available embedded
@@ -404,9 +418,10 @@ are resolutions over assertions, not destructive replacements.
   bytes were read. A newer observation makes that verification ineligible for
   automatic matching until the bytes are measured again.
 - The production app can create/open a Library Project; add, replace, or rescan a
-  folder; import a completed Amazon inventory; and inventory the system Apple
-  Photos library after full PhotoKit authorization. It does not access Amazon
-  cookies. Google production import remains visibly staged but unavailable.
+  folder; import a completed Amazon inventory; attach several downloaded-media
+  folders to that inventory; and inventory the system Apple Photos library after
+  full PhotoKit authorization. It does not access Amazon cookies. Google
+  production import remains visibly staged but unavailable.
 - The dependency-free `ApplePhotosAdapter` includes hidden and burst assets,
   inventories user and smart album memberships, maps PhotoKit resource roles,
   and measures locally available resources with SHA-256 and MD5 while explicitly
@@ -416,10 +431,24 @@ are resolutions over assertions, not destructive replacements.
   Rescans must overlap those anchors; switching the system library or opening the
   project on a Mac with unrelated identifiers is rejected instead of merging
   unrelated library-scoped identifiers under the existing source.
-- Matches presents exact SHA-256 groups and explicit Amazon MD5-and-size review
-  candidates. Confirmed relationships can propagate source People memberships to
-  canonical PhotoDeFrigifier people. Public PhotoKit does not expose or modify
-  Apple's native People identities.
+- Matches presents side-by-side, memory-only previews for exact SHA-256, Amazon
+  MD5/type/size, normalized exact-filename, and matching-filename-stem evidence.
+  Pair decisions include both resource and current observation IDs, every
+  unordered pair is reviewed in bounded groups, exact-byte pairs are automatic,
+  and contradictory transitive decisions block planning. Confirmed relationships
+  can propagate source People memberships to canonical PhotoDeFrigifier people.
+  Public PhotoKit does not expose or modify Apple's native People identities.
+- Filesystem previews walk beneath a security-scoped root using descriptor-relative
+  opens without following symlinks, verify cataloged SHA-256 before decode, and
+  detect changes while decoding. Apple previews are local-only PhotoKit asset
+  renditions and are labeled as such rather than represented as resource-specific.
+  Amazon inventory previews are explicitly labeled proxies backed by attached
+  local candidates. Preview caching is memory-only and byte-bounded.
+- Destinations and Review are always available. Review derives one conservative
+  retained representative only when every current resource in two compound
+  assets has a one-to-one established match, applies the most restrictive person
+  route, and reports duplicate, person, Amazon-download, destination, and archive
+  blockers. No destructive or provider write operation is implemented.
 - **Observed 2026-09-01**: the retained 8,598-record private Amazon inventory
   imported and round-tripped successfully as 6,300 provisional assets, 68,375
   typed claims, 24 source-scoped People clusters, and 2,269 memberships.
@@ -448,6 +477,20 @@ are resolutions over assertions, not destructive replacements.
   only as a persisted user review decision. If one MD5-and-size group contains
   multiple distinct local SHA-256 values, it is withheld as ambiguous rather than
   offered for confirmation.
+- Exact filenames are compared case-insensitively after Unicode normalization and
+  only across compatible media/resource classes. Matching stems across extensions
+  form a lower-confidence tier. Both tiers require explicit pair review.
+- Pair decisions are valid only for the current observations. A rescan that creates
+  a new observation makes an earlier decision inapplicable until reviewed again.
+- Amazon MD5 groups create only local-to-Amazon review pairs. Two Amazon inventory
+  records never use the same unconfirmed local proxy as evidence against each
+  other, and resources belonging to one source item are never compared as
+  duplicates.
+- Filename groups above 100 occurrences, or review groups that would exceed the
+  global 20,000-pair budget, are not expanded quadratically. They remain visible
+  and block readiness until source scope or naming is narrowed. Large exact-byte
+  groups use a linear identity graph; Amazon MD5 groups compare one local
+  representative per source library with each Amazon occurrence.
 
 ## Metadata Portability
 
@@ -493,18 +536,25 @@ or reinterpret provider-specific values.
 - Use annotated transport copies only when cloud date/location requires embedded
   metadata absent from the original. Never modify the source original.
 
-## Privacy Levels
+## Destination Routing
 
-### Private, Cloud Acceptable
+### Apple
 
-- Import into Apple Photos.
-- Set `isHidden` through public PhotoKit.
-- Clearly disclose that the item remains in iCloud and is not independently
-  encrypted by PhotoDeFrigifier.
+- `Visible` plans an ordinary Apple Photos item.
+- `Hidden` plans `isHidden` through public PhotoKit and clearly discloses that the
+  item remains in iCloud and is not independently encrypted by PhotoDeFrigifier.
+- `Exclude` keeps the item out of Apple operations.
 
-### Never Cloud
+### Google
 
-- Exclude from every Apple and Google operation plan.
+- `Include` places the item in the Google-ready export plan.
+- `Exclude` keeps the item out of Google operations.
+
+### Shared Rules
+
+- Most restrictive person routing wins when several people are assigned.
+- Items without person assignments default to Apple `Visible` and Google `Include`.
+- Every retained original remains in both archive plans regardless of cloud route.
 - Do not persist plaintext thumbnails.
 - Keep sensitive catalog information encrypted at rest.
 - Use an established backend such as `restic`; do not invent an archive format.
