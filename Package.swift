@@ -8,57 +8,25 @@ let package = Package(
     .macOS(.v26)
   ],
   products: [
-    .library(name: "PhotoCatalogCore", targets: ["PhotoCatalogCore"]),
-    .library(name: "ApplePhotosAdapter", targets: ["ApplePhotosAdapter"]),
-    .library(name: "ProviderAccessCore", targets: ["ProviderAccessCore"]),
+    .library(name: "QuickFixCore", targets: ["QuickFixCore"]),
     .executable(name: "PhotoDeFrigifierApp", targets: ["PhotoDeFrigifierApp"]),
-    .executable(name: "ProviderAccessLab", targets: ["ProviderAccessLab"]),
   ],
   targets: [
-    .target(
-      name: "PhotoCatalogCore",
-      linkerSettings: [
-        .linkedFramework("ImageIO"),
-        .linkedFramework("UniformTypeIdentifiers"),
-      ]
-    ),
-    .target(
-      name: "ApplePhotosAdapter",
-      dependencies: ["PhotoCatalogCore"],
-      linkerSettings: [
-        .linkedFramework("Photos")
-      ]
-    ),
-    .target(
-      name: "ProviderAccessCore",
-      linkerSettings: [
-        .linkedFramework("Photos")
-      ]
-    ),
+    // Review logic with no PhotoKit dependency: models, the JSON review store, queue ordering, date rules.
+    .target(name: "QuickFixCore"),
+    // The SwiftUI app: PhotoKit access, the review screen and the sheets.
     .executableTarget(
       name: "PhotoDeFrigifierApp",
-      dependencies: ["PhotoCatalogCore", "ApplePhotosAdapter"],
+      dependencies: ["QuickFixCore"],
       linkerSettings: [
-        .linkedFramework("AVFoundation"),
-        .linkedFramework("CoreGraphics"),
-        .linkedFramework("ImageIO"),
+        .linkedFramework("Photos"),
+        .linkedFramework("AVKit"),
+        .linkedFramework("CoreImage"),
       ]
     ),
-    .executableTarget(
-      name: "ProviderAccessLab",
-      dependencies: ["PhotoCatalogCore", "ProviderAccessCore"]
-    ),
     .testTarget(
-      name: "PhotoCatalogCoreTests",
-      dependencies: ["PhotoCatalogCore"]
-    ),
-    .testTarget(
-      name: "ApplePhotosAdapterTests",
-      dependencies: ["ApplePhotosAdapter"]
-    ),
-    .testTarget(
-      name: "ProviderAccessCoreTests",
-      dependencies: ["ProviderAccessCore"]
+      name: "QuickFixCoreTests",
+      dependencies: ["QuickFixCore"]
     ),
   ]
 )

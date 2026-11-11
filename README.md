@@ -1,88 +1,101 @@
 # PhotoDeFrigifier
 
-PhotoDeFrigifier is a local-first macOS project for reconciling Apple Photos,
-Google Photos, Amazon Photos, and loose media without modifying source originals.
+A Mac app for quick, repeatable clean-up of an Apple Photos library. It shows one photo at a time with one-key fixes, so a session can be 5 photos or 500. Everything it learns goes into a JSON store, so later passes (and scripts, and Claude) can build on it.
 
-The repository currently contains a provider-neutral catalog library and two
-native macOS executables:
+> Earlier versions of this repo were a multi-provider reconciliation catalog. That code was retired in favour of this app; it's still in the git history before the `photo-quick-fix` branch.
 
-- `PhotoCatalogCore`: versioned canonical entities, import adapters, identity
-  indexes, claim-preserving merges, and private JSONL persistence.
-- `ApplePhotosAdapter`: a production PhotoKit inventory adapter that reads the
-  system library without modifying it or downloading iCloud-only resources.
-- `PhotoDeFrigifierApp`: the production Library Project dashboard and staged
-  reconciliation workflow.
-- `ProviderAccessLab`: an isolated utility for safe provider capability probes.
+## What it does
 
-See [`docs/PLAN_DETAILS.md`](docs/PLAN_DETAILS.md) for decisions, provider
-constraints, security rules, and the implementation roadmap.
+- **Sidebar**
+  - **All Photos.**
+  - **Needs a Look:** not reviewed yet, Undated (1900), screenshots, short videos, low resolution, no location.
+  - **Marked:** Look at Later, To Delete, Blurry, To Records.
+  - **Every album and folder** in your library. Pick one to work through just that album.
+- **Fix:**
+  - **Rotate** (E / R) as a normal Photos edit, so "Revert to Original" still works.
+  - **Favourite** (F).
+  - **Set the date** (T), either exact or "year / month only" with the date-approximate convention.
+- **Mark:**
+  - **To Delete** (D).
+  - **Blurry** (B).
+  - **To Records** (P): saves the original to your records folder (Google Drive › Personal Records is found automatically). Once saved, it's marked To Delete.
+- **Done with this photo:**
+  - **Good Enough** (1).
+  - **Look at Later** (2).
+  - **Everything is in Order!** (3). New passes leave these out by default.
+  - **Archive** (A): important to keep, but not to see every day. The app adds the keyword **Archived** in Photos and checks Photos reports it. The keyword is the lasting label: it shows in Photos' Info panel and search, and travels with exports.
+    - **Hiding is batched.** macOS asks for confirmation every time an app hides photos, so archived photos stay visible until you click **Hide Archived (N)** in the toolbar (or ⇧⌘H). That hides them all with one confirmation.
+    - **Undo (U)** removes the keyword, and unhides the photo if it was already hidden. Unhiding can fail if Photos keeps the Hidden album locked to other apps; then unhide it in Photos › Hidden.
+    - The first use asks for permission to control Photos.
+- **Move around:** → or Space skips, ← goes back, U or ⌘Z undoes the last action.
+- **Passes:** each album or queue remembers where you left off, in a stable shuffled (or date) order. When you've seen everything, start another pass.
+- **Deleting** only happens in **Review Deletions**: untick anything to keep, then confirm. macOS asks too, and Photos keeps deleted items in Recently Deleted for 30 days.
+- **Health panel** (top right of the photo, H to hide or show): coloured rows for what the app can measure about the photo.
+  - **Date:** red for no date (1900), yellow when approximate (redated by year or month, or the "Date approximate" keyword).
+  - **Location:** grey for screenshots.
+  - **Size:** red under 1 MP, yellow under 2 MP.
+  - **Sharpness:** red if marked Blurry, green once you've reviewed it without marking it, yellow before that.
+  - **Album:** red in none, yellow only in import or Quick Fix albums.
 
-## Common Commands
+  Hidden, it shrinks to a slim colour strip. Click the Date row to set the date. Keywords are read from Photos a moment after a photo appears, and also show in the info panel.
+- **Albums** (L, or the Album tile).
+  - **Recent albums** sit under the health panel, newest first. **⌥1–⌥5** add the photo to one of them; press again to take it back out. ⌘Z undoes.
+  - **L** opens the picker, which has the search box ready and lists:
+    - **Recent**, with ⌘1–⌘5;
+    - **Same day as this photo**: albums that already hold photos from that day;
+    - **all albums A–Z**;
+    - **New album…** (⌘N), which starts in the folder of your most recent album.
+  - In the picker, ⏎ adds or removes, and ⌘⏎ adds and moves to the next photo.
+  - Recent albums are the ones you've used in this app. Until you've used a few, they're filled from the albums of photos you reviewed recently.
+  - The Quick Fix marker albums are never offered.
+- **Right-click the photo** for:
+  - **Copy Photo** (also ⌘C): the full-size current version goes on the clipboard. For a video, the file goes on instead, ready to paste into Finder, Messages or Mail.
+  - **Copy File Name**.
+  - **Show in Photos**, which brings Photos forward on that item.
+  - **Add to Album…**, **Set Date…** and **Favourite**.
+- **Hidden photos are left out everywhere:** in queues, albums, counts, and the delete and records reviews. A photo you hide in Photos disappears from the app.
+- **Albums in Photos:** markers are mirrored into a **Quick Fix** folder in Photos, so they show on your iPhone too. You can turn this off.
+
+The review store is `~/Library/Application Support/PhotoDeFrigifier/review-store.json`, with `actions.jsonl` as an append-only history. The format is in [skills/photo-review-store/SKILL.md](skills/photo-review-store/SKILL.md).
+
+## Build and run
 
 ```sh
-make help
-make doctor
-make build
-make test
-make check
-make package
-make run
-make run-lab
+make run      # build, package .build/apps/PhotoDeFrigifier.app and open it
+make test     # unit tests (QuickFixCore)
+make check    # plist, tests, build
 ```
 
-`make run` packages both applications. Provider Access Lab remains available
-from the production app's Advanced section. Use `make run-lab` to open the lab
-directly.
+- **Requirements:** macOS 26 and Xcode 26 (Swift 6.2+). No third-party dependencies.
+- **Photos access:** the first launch asks for it.
+- **Signing:** the app is ad-hoc signed, so macOS may ask for Photos access again after a rebuild. Set `SIGN_IDENTITY="Apple Development: …"` to sign with your own certificate and keep the permission.
 
-The application uses only Apple system frameworks and Swift Package
-Manager. It does not require provider developer accounts or third-party tools.
+**Diagnostics** (read-only): this writes counts and timings to `self-check.json` and quits.
 
-Provider Access Lab can create a complete private Amazon metadata inventory as
-JSONL. Unlike sanitized probe reports, that file contains identifying metadata;
-write it only to an encrypted or otherwise private destination. Authentication
-cookies remain memory-only and are never included in the export. The export
-flow first loads a Cookie request header from a selected local file (or the
-masked field), then selects a private output directory for a timestamped JSONL
-file.
+```sh
+open .build/apps/PhotoDeFrigifier.app --args --self-check
+```
 
-The production app creates or opens a `.photodefrigifier` Library Project. Each
-project package contains a private manifest, canonical catalog, and user-authored
-review state. It can gather Apple Photos through PhotoKit, completed Amazon
-inventories, or ordinary folders on disk. Folder scans recurse without changing
-source files, measure SHA-256 and MD5 in one streaming pass, and read embedded
-image metadata when available. A folder source can be replaced while preserving
-its source identity and scan history.
+## Layout
 
-An Amazon inventory can own several attached download-folder sources. The app
-tracks confirmed downloaded items, missing inventory items, candidate local
-matches, and unmatched local files without treating provider-reported MD5 as
-verified identity.
+| Path | What |
+|---|---|
+| `Sources/QuickFixCore` | Models, review store, queue ordering, date rules. No PhotoKit, fully unit-tested. |
+| `Sources/PhotoDeFrigifierApp` | SwiftUI app: `PhotoLibrary` (all PhotoKit access), `ReviewModel` (actions, undo, keys), views and sheets. |
+| `Tests/QuickFixCoreTests` | Swift Testing suite. |
+| `skills/` | Reusable Claude skills from the Amazon → Apple Photos migration (below). |
 
-Apple scans include hidden and burst assets, user and smart album memberships,
-and compound resources such as RAW and Live Photo pairs. Locally available
-resources are measured without network access; iCloud-only and unreadable
-resources are reported separately.
+## Claude skills
 
-Each provider occurrence begins as a provisional asset. Amazon-reported MD5 plus
-byte length can be compared with locally measured MD5 only as an explicit review
-candidate. Ambiguous MD5 collisions are withheld, and automatic resource matches
-still require locally measured SHA-256, byte length, current observations, and
-compatible resource roles. Confirmed review relationships can propagate source
-People claims into PhotoDeFrigifier-managed canonical people and privacy
-categories without attempting to change Apple Photos People data. Project files
-retain raw provider records and identifying metadata, are written atomically with
-mode `0600`, and still require encrypted or otherwise private storage.
+The `skills/` folder holds what we learned moving an Amazon Photos library into Apple Photos, written as Claude skills:
 
-Matches compares memory-only visual previews side by side. Exact SHA-256 pairs
-are automatic and cannot be rejected; Amazon MD5/type, normalized filename, and
-matching-stem pairs require explicit review bound to the current observations.
-Apple previews are marked as asset renditions because public PhotoKit cannot
-promise a resource-specific thumbnail. Local previews are opened beneath their
-security-scoped source without following symlinks and are revalidated against the
-cataloged SHA-256 before decoding.
+| Skill | Covers |
+|---|---|
+| `photo-library-migration` | The end-to-end playbook and safety rules. |
+| `amazon-photos-export` | Amazon Photos' private web API: inventory, People, download, completeness proof. |
+| `photo-duplicate-finding` | Exact, same-moment, fingerprint and perceptual-hash matching, keeper rules, review tools. |
+| `photo-date-repair` | Trustworthy dates, camera clocks, video UTC quirks, placeholder conventions. |
+| `apple-photos-automation` | osxphotos, photoscript, PhotoKit, permissions, import recipe. |
+| `photo-review-store` | Reading and acting on this app's review store. |
 
-People routing is explicit per destination: Apple `Visible`, `Hidden`, or
-`Exclude`, and Google `Include` or `Exclude`. The most restrictive assigned
-person wins. Destinations persist a Google-ready export location and two distinct
-archive locations. Review derives a non-destructive plan and blockers; this
-version performs no move, upload, deletion, PhotoKit write, or archive operation.
+`make install-skills` links them into `~/.claude/skills` so every Claude Code session can use them. `make uninstall-skills` removes the links.
